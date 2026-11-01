@@ -2,6 +2,7 @@
 
 import fnmatch
 import hashlib
+import logging
 import os
 import sqlite3
 import threading
@@ -23,6 +24,8 @@ WHOLE_FILE_LIMIT = 64 * 1024 * 1024
 # Larger documents are skipped: extracting them could exhaust memory, and a file this big
 # is almost always a log or data dump rather than something to search.
 MAX_EXTRACT_SIZE = 200 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -206,6 +209,14 @@ def clean_text(text: str) -> str:
     return text
 
 
+def _record_failure(report: IndexReport, path: Path, reason: str) -> None:
+    report.failed.append((path, reason))
+    logger.warning(
+        "Could not index file",
+        extra={"event": "file_failed", "path": str(path), "reason": reason},
+    )
+
+
 def _index_file_safely(
     store: IndexStore,
     path: Path,
@@ -225,6 +236,10 @@ def _index_file_safely(
         raise
     except Exception as exc:  # noqa: BLE001 - includes MemoryError and parser bugs
         report.failed.append((path, f"unexpected error: {type(exc).__name__}: {exc}"))
+        logger.exception(
+            "Unexpected error indexing file",
+            extra={"event": "file_error", "path": str(path), "error": type(exc).__name__},
+        )
         return False
 
 
@@ -256,7 +271,7 @@ def _index_file(
         else:
             digest = file_hash(path)
     except OSError as exc:
-        report.failed.append((path, exc.strerror or str(exc)))
+        _record_failure(report, path, exc.strerror or str(exc))
         return False
 
     if existing is not None and (stat_unchanged or existing.content_hash == digest):
@@ -271,12 +286,12 @@ def _index_file(
     else:
         if stat.st_size > MAX_EXTRACT_SIZE:
             size_mb = stat.st_size / 1024**2
-            report.failed.append((path, f"too large to index ({size_mb:.0f} MB)"))
+            _record_failure(report, path, f"too large to index ({size_mb:.0f} MB)")
             return False
         try:
             text = extract_text(path, data)
         except ExtractionError as exc:
-            report.failed.append((path, str(exc)))
+            _record_failure(report, path, str(exc))
             return False
         store.upsert_document(key, stat.st_mtime, stat.st_size, clean_text(text), digest)
         if existing:
@@ -303,6 +318,8 @@ def index_folder(
     """
     root = Path(root).resolve()
     report = IndexReport()
+    started = time.monotonic()
+    logger.info("Indexing folder", extra={"event": "scan_started", "folder": str(root)})
     # One query up front instead of a lookup per file.
     known = store.documents_under(root)
     seen: set[str] = set()
@@ -328,7 +345,7 @@ def index_folder(
             try:
                 stat = entry.stat()
             except OSError as exc:
-                report.failed.append((path, exc.strerror or str(exc)))
+                _record_failure(report, path, exc.strerror or str(exc))
                 continue
             if _index_file_safely(store, path, report, known.get(key), stat, known):
                 pending += 1
@@ -341,13 +358,35 @@ def index_folder(
     except IndexCancelled:
         store.commit()
         report.cancelled = True
+        _log_summary("Indexing cancelled", "scan_cancelled", root, report, started)
         return report
 
     removed = [record.id for key, record in known.items() if key not in seen]
     store.delete_ids(removed)
     report.removed = len(removed)
     store.commit()
+    _log_summary("Indexed folder", "scan_finished", root, report, started)
     return report
+
+
+def _log_summary(
+    message: str, event: str, root: Path, report: IndexReport, started: float
+) -> None:
+    logger.info(
+        message,
+        extra={
+            "event": event,
+            "folder": str(root),
+            "seconds": round(time.monotonic() - started, 2),
+            "added": report.added,
+            "updated": report.updated,
+            "unchanged": report.unchanged,
+            "moved": report.moved,
+            "removed": report.removed,
+            "unsupported": report.unsupported,
+            "failed": len(report.failed),
+        },
+    )
 
 
 def update_paths(
@@ -383,7 +422,7 @@ def update_paths(
             try:
                 stat = file.stat()
             except OSError as exc:
-                report.failed.append((file, exc.strerror or str(exc)))
+                _record_failure(report, file, exc.strerror or str(exc))
                 continue
             _index_file_safely(store, file, report, store.get_document(str(file)), stat)
     for path in missing:
@@ -393,6 +432,18 @@ def update_paths(
             report.removed += 1
 
     store.commit()
+    logger.info(
+        "Applied file changes",
+        extra={
+            "event": "changes_applied",
+            "paths": len(relevant),
+            "added": report.added,
+            "updated": report.updated,
+            "moved": report.moved,
+            "removed": report.removed,
+            "failed": len(report.failed),
+        },
+    )
     return report
 
 

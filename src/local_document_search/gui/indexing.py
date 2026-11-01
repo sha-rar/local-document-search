@@ -1,5 +1,6 @@
 """Run indexing on a worker thread so the GUI event loop stays responsive."""
 
+import logging
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -22,6 +23,8 @@ from ..storage import IndexStore
 PROGRESS_INTERVAL = 0.05
 
 MISSING_FOLDER_REASON = "Folder not found; skipped"
+
+logger = logging.getLogger(__name__)
 
 
 class IndexWorker(QObject):
@@ -90,8 +93,14 @@ class IndexWorker(QObject):
         except IndexCancelled:
             pass  # cancelled while counting; nothing was indexed
         except Exception as exc:  # noqa: BLE001 - report anything rather than kill the thread silently
+            logger.exception("Indexing failed", extra={"event": "index_job_failed"})
             self.failed.emit(str(exc))
             return
+        for folder in missing:
+            logger.warning(
+                "Folder not found; skipped",
+                extra={"event": "folder_missing", "folder": str(folder)},
+            )
         self.finished.emit(reports, missing)
 
     def _apply_changes(self) -> None:
@@ -99,6 +108,7 @@ class IndexWorker(QObject):
             with IndexStore(self.db_path) as store:
                 report = update_paths(store, self.changed_paths, self.folders, self.exclude)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Updating changed files failed", extra={"event": "update_job_failed"})
             self.failed.emit(str(exc))
             return
         self.finished.emit([(None, report)], [])

@@ -1,5 +1,6 @@
 """Persist metadata and full-text content in SQLite FTS5."""
 
+import logging
 import os
 import sqlite3
 import time
@@ -48,6 +49,8 @@ def _add_content_hash(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
     connection.execute("CREATE INDEX documents_content ON documents (size, content_hash)")
 
+
+logger = logging.getLogger(__name__)
 
 # MIGRATIONS[n] upgrades a database from schema version n to n + 1.
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_add_path_metadata, _add_content_hash]
@@ -103,9 +106,21 @@ class IndexStore:
         with self.connection:
             if not has_tables:
                 self.connection.executescript(SCHEMA)
+                logger.info(
+                    "Created index", extra={"event": "index_created", "path": str(self.db_path)}
+                )
             else:
                 for migrate in MIGRATIONS[version:]:
                     migrate(self.connection)
+                logger.info(
+                    "Upgraded index",
+                    extra={
+                        "event": "index_migrated",
+                        "path": str(self.db_path),
+                        "from_version": version,
+                        "to_version": SCHEMA_VERSION,
+                    },
+                )
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def __enter__(self) -> "IndexStore":

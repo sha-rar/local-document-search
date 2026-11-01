@@ -1,5 +1,6 @@
 """Run searches on a worker thread so typing never waits on the database."""
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
@@ -7,6 +8,8 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from ..search import SearchFilters, search
 from ..storage import IndexStore
 from .preview import HIGHLIGHT_END, HIGHLIGHT_START, PREVIEW_SNIPPET_TOKENS
+
+logger = logging.getLogger(__name__)
 
 
 class SearchWorker(QObject):
@@ -38,6 +41,7 @@ class SearchWorker(QObject):
                 snippet_tokens=PREVIEW_SNIPPET_TOKENS,
             )
         except Exception as exc:  # noqa: BLE001 - surface any failure in the UI
+            logger.exception("Search failed", extra={"event": "search_failed", "query": query})
             self.failed.emit(request_id, str(exc))
             return
         self.finished.emit(request_id, hits)

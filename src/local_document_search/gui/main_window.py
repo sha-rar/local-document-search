@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..diagnostics import default_log_dir
 from ..indexer import IndexReport, remove_folder
 from ..monitor import FolderMonitor
 from ..search import SearchHit
@@ -219,6 +220,16 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        self.open_logs_action = QAction("Open &log folder", self)
+        self.open_logs_action.triggered.connect(self.open_log_folder)
+        help_menu.addAction(self.open_logs_action)
+
+    def open_log_folder(self) -> None:
+        log_dir = default_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        open_document(log_dir)
 
     def _save_folders(self) -> None:
         self.settings.folders = [str(folder) for folder in self.folder_panel.folders()]

@@ -1,5 +1,6 @@
 """Watch folders for changes and report them in debounced batches."""
 
+import logging
 import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -10,6 +11,8 @@ from watchdog.observers import Observer
 from .extractors import is_supported
 
 DEFAULT_DEBOUNCE_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 class _ChangeCollector(FileSystemEventHandler):
@@ -69,12 +72,27 @@ class FolderMonitor:
         observer = Observer()
         handler = _ChangeCollector(self._record)
         for folder in self.folders:
-            if folder.is_dir():
+            if not folder.is_dir():
+                logger.warning(
+                    "Folder not found; not watching it",
+                    extra={"event": "watch_skipped", "folder": str(folder)},
+                )
+                continue
+            try:
                 observer.schedule(handler, str(folder), recursive=True)
+            except OSError as exc:
+                # e.g. a network share that doesn't support change notifications
+                logger.warning(
+                    "Could not watch folder",
+                    extra={"event": "watch_failed", "folder": str(folder), "reason": str(exc)},
+                )
         observer.daemon = True
         self._stopped = False
         observer.start()
         self._observer = observer
+        logger.info(
+            "Watching folders", extra={"event": "watch_started", "folders": len(self.folders)}
+        )
 
     def stop(self, wait: bool = False) -> None:
         """Stop reporting changes immediately.
@@ -114,4 +132,5 @@ class FolderMonitor:
             paths, self._pending = self._pending, set()
             self._timer = None
         if paths:
+            logger.debug("Files changed", extra={"event": "changes_detected", "paths": len(paths)})
             self.on_changes(paths)

@@ -1,12 +1,15 @@
 """Command-line interface for indexing folders and searching their contents."""
 
 import argparse
+import json
+import logging
 import signal
 import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
+from .diagnostics import collect_diagnostics, configure_logging
 from .formatting import format_size
 from .indexer import Exclusions, IndexControl, index_folder, prune_missing
 from .search import SearchFilters, search
@@ -35,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=f"Index database file (default: {default_db_path()})",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Also print log messages while running"
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -89,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--before", type=parse_date, metavar="DATE", help="Only files modified before YYYY-MM-DD"
     )
 
+    commands.add_parser(
+        "diagnostics",
+        help="Print version and environment details for a bug report",
+    )
     commands.add_parser(
         "prune",
         help="Remove index entries for files that no longer exist",
@@ -158,15 +168,26 @@ def run_search(db_path: Path, query: str, limit: int, filters: SearchFilters) ->
     return 0
 
 
+logger = logging.getLogger(__name__)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     db_path = args.db or default_db_path()
     try:
-        return dispatch(args, db_path)
+        log_path = configure_logging(verbose=args.verbose)
+    except OSError as exc:
+        # Logging is a diagnostic aid; never let it stop the command.
+        print(f"warning: could not open the log file: {exc}", file=sys.stderr)
+        log_path = None
+    try:
+        return dispatch(args, db_path, log_path)
     except sqlite3.OperationalError as exc:
+        logger.exception("Index unavailable", extra={"event": "index_unavailable"})
         print(f"error: could not use the index at {db_path}: {exc}", file=sys.stderr)
         return 1
     except sqlite3.DatabaseError as exc:
+        logger.exception("Index damaged", extra={"event": "index_damaged"})
         print(
             f"error: the index at {db_path} is damaged ({exc}).\n"
             "Delete it and run 'docsearch index <folder>' again to rebuild it; "
@@ -174,9 +195,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except Exception:
+        logger.exception("Unexpected error", extra={"event": "crash", "command": args.command})
+        raise
 
 
-def dispatch(args: argparse.Namespace, db_path: Path) -> int:
+def dispatch(args: argparse.Namespace, db_path: Path, log_path: Path | None) -> int:
+    if args.command == "diagnostics":
+        print(json.dumps(collect_diagnostics(db_path, log_path), indent=2))
+        return 0
     if args.command == "index":
         exclusions = Exclusions(
             folders=tuple(args.exclude),
