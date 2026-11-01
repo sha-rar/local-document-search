@@ -16,10 +16,12 @@ CREATE TABLE documents (
     directory TEXT NOT NULL,
     mtime REAL NOT NULL,
     size INTEGER NOT NULL,
-    indexed_at REAL NOT NULL
+    indexed_at REAL NOT NULL,
+    content_hash TEXT
 );
 CREATE INDEX documents_extension ON documents (extension);
 CREATE INDEX documents_mtime ON documents (mtime);
+CREATE INDEX documents_content ON documents (size, content_hash);
 CREATE VIRTUAL TABLE documents_fts USING fts5(
     name,
     content,
@@ -41,8 +43,14 @@ def _add_path_metadata(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_content_hash(connection: sqlite3.Connection) -> None:
+    # Existing rows keep NULL until the indexer next sees the file.
+    connection.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
+    connection.execute("CREATE INDEX documents_content ON documents (size, content_hash)")
+
+
 # MIGRATIONS[n] upgrades a database from schema version n to n + 1.
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_add_path_metadata]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_add_path_metadata, _add_content_hash]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -65,6 +73,7 @@ class DocumentRecord:
     path: str
     mtime: float
     size: int
+    content_hash: str | None
 
 
 class IndexStore:
@@ -104,19 +113,30 @@ class IndexStore:
 
     def get_document(self, path: str) -> DocumentRecord | None:
         row = self.connection.execute(
-            "SELECT id, path, mtime, size FROM documents WHERE path = ?", (path,)
+            "SELECT id, path, mtime, size, content_hash FROM documents WHERE path = ?", (path,)
         ).fetchone()
         return DocumentRecord(**row) if row else None
 
-    def upsert_document(self, path: str, mtime: float, size: int, text: str) -> None:
+    def find_by_content(self, size: int, content_hash: str) -> list[DocumentRecord]:
+        rows = self.connection.execute(
+            "SELECT id, path, mtime, size, content_hash FROM documents"
+            " WHERE size = ? AND content_hash = ?",
+            (size, content_hash),
+        )
+        return [DocumentRecord(**row) for row in rows]
+
+    def upsert_document(
+        self, path: str, mtime: float, size: int, text: str, content_hash: str | None = None
+    ) -> None:
         existing = self.get_document(path)
         name, extension, directory = path_metadata(path)
         now = time.time()
         if existing is None:
             cursor = self.connection.execute(
-                "INSERT INTO documents (path, name, extension, directory, mtime, size, indexed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (path, name, extension, directory, mtime, size, now),
+                "INSERT INTO documents"
+                " (path, name, extension, directory, mtime, size, indexed_at, content_hash)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (path, name, extension, directory, mtime, size, now, content_hash),
             )
             self.connection.execute(
                 "INSERT INTO documents_fts (rowid, name, content) VALUES (?, ?, ?)",
@@ -124,13 +144,35 @@ class IndexStore:
             )
         else:
             self.connection.execute(
-                "UPDATE documents SET mtime = ?, size = ?, indexed_at = ? WHERE id = ?",
-                (mtime, size, now, existing.id),
+                "UPDATE documents SET mtime = ?, size = ?, indexed_at = ?, content_hash = ?"
+                " WHERE id = ?",
+                (mtime, size, now, content_hash, existing.id),
             )
             self.connection.execute(
                 "UPDATE documents_fts SET name = ?, content = ? WHERE rowid = ?",
                 (name, text, existing.id),
             )
+
+    def update_file_state(
+        self, document_id: int, mtime: float, size: int, content_hash: str | None
+    ) -> None:
+        """Record new stat/hash values for a document whose extracted text is still valid."""
+        self.connection.execute(
+            "UPDATE documents SET mtime = ?, size = ?, content_hash = ? WHERE id = ?",
+            (mtime, size, content_hash, document_id),
+        )
+
+    def move_document(self, document_id: int, new_path: str, mtime: float) -> None:
+        """Point an existing document at a new path, keeping its extracted text."""
+        name, extension, directory = path_metadata(new_path)
+        self.connection.execute(
+            "UPDATE documents SET path = ?, name = ?, extension = ?, directory = ?, mtime = ?,"
+            " indexed_at = ? WHERE id = ?",
+            (new_path, name, extension, directory, mtime, time.time(), document_id),
+        )
+        self.connection.execute(
+            "UPDATE documents_fts SET name = ? WHERE rowid = ?", (name, document_id)
+        )
 
     def delete_document(self, path: str) -> None:
         existing = self.get_document(path)

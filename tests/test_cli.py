@@ -52,6 +52,20 @@ def test_search_rejects_bad_date(tmp_path, capsys):
     assert "expected YYYY-MM-DD" in capsys.readouterr().err
 
 
+def test_prune_removes_missing_files(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_text("alpha", encoding="utf-8")
+    (docs / "b.txt").write_text("beta", encoding="utf-8")
+    db = tmp_path / "index.db"
+    main(["--db", str(db), "index", str(docs)])
+    (docs / "a.txt").unlink()
+    capsys.readouterr()
+
+    assert main(["--db", str(db), "prune"]) == 0
+    assert "Removed 1 missing documents; 1 remain" in capsys.readouterr().out
+
+
 def test_search_reports_no_matches(tmp_path, capsys):
     docs = tmp_path / "docs"
     docs.mkdir()

@@ -5,7 +5,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from .indexer import index_folder
+from .indexer import index_folder, prune_missing
 from .search import SearchFilters, search
 from .storage import IndexStore, default_db_path
 
@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     search_command.add_argument(
         "--before", type=parse_date, metavar="DATE", help="Only files modified before YYYY-MM-DD"
     )
+
+    commands.add_parser(
+        "prune",
+        help="Remove index entries for files that no longer exist",
+        description="Remove index entries for files that no longer exist. Files on a "
+        "disconnected drive count as missing and are removed too.",
+    )
     return parser
 
 
@@ -84,12 +91,23 @@ def run_index(db_path: Path, folder: Path) -> int:
 
     print(
         f"Indexed {folder.resolve()}: {report.added} added, {report.updated} updated, "
-        f"{report.unchanged} unchanged, {report.removed} removed, "
+        f"{report.unchanged} unchanged, {report.moved} moved, {report.removed} removed, "
         f"{report.unsupported} unsupported, {len(report.failed)} failed."
     )
     for path, reason in report.failed:
         print(f"  failed: {path}: {reason}", file=sys.stderr)
     print(f"{total} documents in index ({db_path}).")
+    return 0
+
+
+def run_prune(db_path: Path) -> int:
+    if not db_path.exists():
+        print(f"error: no index at {db_path}", file=sys.stderr)
+        return 1
+    with IndexStore(db_path) as store:
+        removed = prune_missing(store)
+        total = store.document_count()
+    print(f"Removed {removed} missing documents; {total} remain in index.")
     return 0
 
 
@@ -115,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db or default_db_path()
     if args.command == "index":
         return run_index(db_path, args.folder)
+    if args.command == "prune":
+        return run_prune(db_path)
     filters = SearchFilters(
         extensions=tuple(args.types),
         folder=args.folder,

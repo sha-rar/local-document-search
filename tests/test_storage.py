@@ -60,4 +60,5 @@ def test_migrates_v0_database(tmp_path):
 
     with IndexStore(db) as store:
         assert metadata(store, path) == ("todo.md", ".md", str(tmp_path / "notes"), 10, 5.0)
+        assert store.get_document(path).content_hash is None
         assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
