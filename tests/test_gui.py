@@ -263,9 +263,9 @@ def test_gui_stays_responsive_while_indexing(qtbot, window, docs, monkeypatch):
         (docs / f"extra{n}.txt").write_text("filler", encoding="utf-8")
     real_extract = indexer.extract_text
 
-    def slow_extract(path):
+    def slow_extract(path, data=None):
         time.sleep(0.05)
-        return real_extract(path)
+        return real_extract(path, data)
 
     monkeypatch.setattr(indexer, "extract_text", slow_extract)
     ticks = []
@@ -414,9 +414,9 @@ def slow_docs(docs, monkeypatch):
         (docs / f"slow{n}.txt").write_text("filler", encoding="utf-8")
     real_extract = indexer.extract_text
 
-    def slow_extract(path):
+    def slow_extract(path, data=None):
         time.sleep(0.05)
-        return real_extract(path)
+        return real_extract(path, data)
 
     monkeypatch.setattr(indexer, "extract_text", slow_extract)
     return docs

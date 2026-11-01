@@ -3,6 +3,7 @@
 import hashlib
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,8 +11,13 @@ from pathlib import Path
 from .extractors import ExtractionError, extract_text, is_supported
 from .storage import DocumentRecord, IndexStore
 
-COMMIT_EVERY = 200
+# Commit after this many changed files or seconds, whichever comes first, so searches
+# see progress without paying for a disk sync per file.
+COMMIT_EVERY = 1000
+COMMIT_INTERVAL = 2.0
 HASH_CHUNK_SIZE = 1024 * 1024
+# Files up to this size are read once and the bytes reused for hashing and extraction.
+WHOLE_FILE_LIMIT = 64 * 1024 * 1024
 
 
 @dataclass
@@ -71,29 +77,53 @@ def is_excluded(path: Path, excluded: Iterable[Path]) -> bool:
     return any(path.is_relative_to(folder) for folder in excluded)
 
 
-def iter_files(
+def scan_files(
     root: Path,
     errors: list[tuple[Path, str]] | None = None,
     exclude: Iterable[Path] = (),
-) -> Iterator[Path]:
-    """Recursively yield regular files under ``root``, skipping ``exclude`` folders.
+) -> Iterator[os.DirEntry]:
+    """Recursively yield ``DirEntry`` objects for regular files under ``root``.
 
-    Unreadable directories go to ``errors``.
+    Excluded folders, symlinks and junctions are not followed; unreadable directories go
+    to ``errors``. On Windows ``entry.stat()`` is answered from the directory listing, so
+    it costs no extra system call.
     """
     root = Path(root).resolve()
     excluded = [Path(folder).resolve() for folder in exclude]
     if is_excluded(root, excluded):
         return
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink() or (
+                            hasattr(entry, "is_junction") and entry.is_junction()
+                        ):
+                            continue
+                        if entry.is_dir():
+                            child = Path(entry.path)
+                            if not is_excluded(child, excluded):
+                                stack.append(child)
+                        elif entry.is_file():
+                            yield entry
+                    except OSError:
+                        continue
+        except OSError as exc:
+            if errors is not None:
+                errors.append((directory, exc.strerror or str(exc)))
 
-    def on_error(exc: OSError) -> None:
-        if errors is not None:
-            errors.append((Path(exc.filename), exc.strerror or str(exc)))
 
-    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
-        # Pruning dirnames in place stops os.walk from descending into excluded folders.
-        dirnames[:] = [name for name in dirnames if not is_excluded(Path(dirpath) / name, excluded)]
-        for filename in filenames:
-            yield Path(dirpath) / filename
+def iter_files(
+    root: Path,
+    errors: list[tuple[Path, str]] | None = None,
+    exclude: Iterable[Path] = (),
+) -> Iterator[Path]:
+    """Recursively yield regular files under ``root``, skipping ``exclude`` folders."""
+    for entry in scan_files(root, errors, exclude):
+        yield Path(entry.path)
 
 
 def file_hash(path: Path) -> str:
@@ -112,21 +142,33 @@ def find_moved_source(store: IndexStore, size: int, content_hash: str) -> Docume
     return None
 
 
-def _index_file(store: IndexStore, path: Path, report: IndexReport) -> bool:
-    """Bring one supported file's entry up to date; return whether the database changed."""
+def _index_file(
+    store: IndexStore,
+    path: Path,
+    report: IndexReport,
+    existing: DocumentRecord | None,
+    stat: os.stat_result,
+    known: dict[str, DocumentRecord] | None = None,
+) -> bool:
+    """Bring one supported file's entry up to date; return whether the database changed.
+
+    ``existing`` is the file's current record, if any. When a moved file takes over a
+    record, that record's old path is dropped from ``known``.
+    """
     key = str(path)
+    stat_unchanged = (
+        existing is not None and existing.mtime == stat.st_mtime and existing.size == stat.st_size
+    )
+    if stat_unchanged and existing.content_hash is not None:
+        report.unchanged += 1
+        return False
+    data = None
     try:
-        stat = path.stat()
-        existing = store.get_document(key)
-        stat_unchanged = (
-            existing is not None
-            and existing.mtime == stat.st_mtime
-            and existing.size == stat.st_size
-        )
-        if stat_unchanged and existing.content_hash is not None:
-            report.unchanged += 1
-            return False
-        digest = file_hash(path)
+        if stat.st_size <= WHOLE_FILE_LIMIT:
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+        else:
+            digest = file_hash(path)
     except OSError as exc:
         report.failed.append((path, exc.strerror or str(exc)))
         return False
@@ -137,10 +179,12 @@ def _index_file(store: IndexStore, path: Path, report: IndexReport) -> bool:
         report.unchanged += 1
     elif existing is None and (source := find_moved_source(store, stat.st_size, digest)):
         store.move_document(source.id, key, stat.st_mtime)
+        if known is not None:
+            known.pop(source.path, None)
         report.moved += 1
     else:
         try:
-            text = extract_text(path)
+            text = extract_text(path, data)
         except ExtractionError as exc:
             report.failed.append((path, str(exc)))
             return False
@@ -169,11 +213,15 @@ def index_folder(
     """
     root = Path(root).resolve()
     report = IndexReport()
+    # One query up front instead of a lookup per file.
+    known = store.documents_under(root)
     seen: set[str] = set()
     pending = 0
+    last_commit = time.monotonic()
 
     try:
-        for path in iter_files(root, report.failed, exclude):
+        for entry in scan_files(root, report.failed, exclude):
+            path = Path(entry.path)
             if not is_supported(path):
                 report.unsupported += 1
                 continue
@@ -185,22 +233,29 @@ def index_folder(
                 control.checkpoint()
             if progress:
                 progress(path)
-            seen.add(str(path))
-            if _index_file(store, path, report):
+            key = str(path)
+            seen.add(key)
+            try:
+                stat = entry.stat()
+            except OSError as exc:
+                report.failed.append((path, exc.strerror or str(exc)))
+                continue
+            if _index_file(store, path, report, known.get(key), stat, known):
                 pending += 1
-            if pending >= COMMIT_EVERY:
+            if pending and (
+                pending >= COMMIT_EVERY or time.monotonic() - last_commit >= COMMIT_INTERVAL
+            ):
                 store.commit()
                 pending = 0
+                last_commit = time.monotonic()
     except IndexCancelled:
         store.commit()
         report.cancelled = True
         return report
 
-    for key in store.all_paths():
-        if key not in seen and Path(key).is_relative_to(root):
-            store.delete_document(key)
-            report.removed += 1
-
+    removed = [record.id for key, record in known.items() if key not in seen]
+    store.delete_ids(removed)
+    report.removed = len(removed)
     store.commit()
     return report
 
@@ -231,10 +286,15 @@ def update_paths(
     for path in present:
         files = iter_files(path, report.failed, excluded) if path.is_dir() else [path]
         for file in files:
-            if is_supported(file):
-                _index_file(store, file, report)
-            else:
+            if not is_supported(file):
                 report.unsupported += 1
+                continue
+            try:
+                stat = file.stat()
+            except OSError as exc:
+                report.failed.append((file, exc.strerror or str(exc)))
+                continue
+            _index_file(store, file, report, store.get_document(str(file)), stat)
     for path in missing:
         # A missing path may have been a file or a whole folder.
         for key in store.paths_under(path):

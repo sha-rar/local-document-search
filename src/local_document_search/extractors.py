@@ -1,9 +1,11 @@
 """Extract text from supported document formats.
 
-Each extractor takes a file path and returns its text. Register new formats in
-``EXTRACTORS`` keyed by lower-case file extension.
+Each extractor takes a file path, plus the file's bytes when the caller has already read
+them, and returns its text. Register new formats in ``EXTRACTORS`` keyed by lower-case
+file extension.
 """
 
+import io
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,7 +13,7 @@ import docx
 from docx.table import Table
 from pypdf import PdfReader
 
-Extractor = Callable[[Path], str]
+Extractor = Callable[[Path, bytes | None], str]
 
 
 class ExtractionError(Exception):
@@ -29,21 +31,26 @@ def decode_text(data: bytes) -> str:
         return data.decode("cp1252", errors="replace")
 
 
-def extract_plain_text(path: Path) -> str:
+def _read(path: Path) -> bytes:
     try:
-        data = path.read_bytes()
+        return path.read_bytes()
     except OSError as exc:
         raise ExtractionError(f"cannot read file: {exc.strerror or exc}") from exc
+
+
+def extract_plain_text(path: Path, data: bytes | None = None) -> str:
+    if data is None:
+        data = _read(path)
     try:
         return decode_text(data)
     except UnicodeDecodeError as exc:
         raise ExtractionError(f"cannot decode text: {exc.reason}") from exc
 
 
-def extract_pdf_text(path: Path) -> str:
+def extract_pdf_text(path: Path, data: bytes | None = None) -> str:
     """Extract the text layer of a PDF; scanned pages without one yield no text."""
     try:
-        reader = PdfReader(path)
+        reader = PdfReader(path if data is None else io.BytesIO(data))
         # Many encrypted PDFs only restrict editing and open with an empty password.
         if reader.is_encrypted and not reader.decrypt(""):
             raise ExtractionError("PDF is password-protected")
@@ -77,13 +84,14 @@ def _table_lines(table: Table) -> list[str]:
     return lines
 
 
-def extract_docx_text(path: Path) -> str:
+def extract_docx_text(path: Path, data: bytes | None = None) -> str:
     """Extract body paragraphs and table text from a Word document, in document order."""
     try:
-        with path.open("rb") as fh:
-            if fh.read(len(OLE_SIGNATURE)) == OLE_SIGNATURE:
-                raise ExtractionError("DOCX is password-protected")
-        document = docx.Document(str(path))
+        if data is None:
+            data = _read(path)
+        if data.startswith(OLE_SIGNATURE):
+            raise ExtractionError("DOCX is password-protected")
+        document = docx.Document(io.BytesIO(data))
         lines = []
         for block in document.iter_inner_content():
             if isinstance(block, Table):
@@ -116,8 +124,9 @@ def is_supported(path: Path) -> bool:
     return get_extractor(path) is not None
 
 
-def extract_text(path: Path) -> str:
+def extract_text(path: Path, data: bytes | None = None) -> str:
+    """Extract ``path``'s text, using ``data`` instead of reading the file when given."""
     extractor = get_extractor(path)
     if extractor is None:
         raise ExtractionError(f"unsupported file type: {path.suffix or '(none)'}")
-    return extractor(path)
+    return extractor(path, data)

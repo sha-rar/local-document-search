@@ -1,4 +1,7 @@
 import os
+import subprocess
+import sys
+from pathlib import Path
 import threading
 
 import pytest
@@ -78,7 +81,7 @@ def test_moved_file_keeps_entry_without_reextracting(store, docs, monkeypatch, d
     original = store.get_document(str(docs.resolve() / "one.txt"))
     (docs / "one.txt").rename(docs / destination)
 
-    monkeypatch.setattr(indexer, "extract_text", lambda path: pytest.fail("re-extracted"))
+    monkeypatch.setattr(indexer, "extract_text", lambda *args: pytest.fail("re-extracted"))
     report = index_folder(store, docs)
 
     assert (report.moved, report.added, report.removed) == (1, 0, 0)
@@ -113,7 +116,7 @@ def test_touched_file_is_not_reextracted(store, docs, monkeypatch):
     stat = path.stat()
     os.utime(path, (stat.st_atime, stat.st_mtime + 10))
 
-    monkeypatch.setattr(indexer, "extract_text", lambda path: pytest.fail("re-extracted"))
+    monkeypatch.setattr(indexer, "extract_text", lambda *args: pytest.fail("re-extracted"))
     report = index_folder(store, docs)
     assert (report.unchanged, report.updated) == (2, 0)
     assert store.get_document(str(path.resolve())).mtime == stat.st_mtime + 10
@@ -181,7 +184,7 @@ def test_update_paths_handles_moves_and_folder_deletion(store, docs, monkeypatch
     index_folder(store, docs)
     root = docs.resolve()
     (root / "one.txt").rename(root / "sub" / "one.txt")
-    monkeypatch.setattr(indexer, "extract_text", lambda path: pytest.fail("re-extracted"))
+    monkeypatch.setattr(indexer, "extract_text", lambda *args: pytest.fail("re-extracted"))
     # Order of reported paths must not matter.
     report = update_paths(store, [root / "one.txt", root / "sub" / "one.txt"], [docs])
     assert (report.moved, report.removed) == (1, 0)
@@ -261,3 +264,24 @@ def test_cancel_wakes_a_paused_indexer(tmp_path, docs):
     assert not control.paused
     with IndexStore(tmp_path / "index.db") as store:
         assert index_folder(store, docs, control=control).cancelled
+
+
+def test_large_files_are_hashed_in_chunks(store, docs, monkeypatch):
+    monkeypatch.setattr(indexer, "WHOLE_FILE_LIMIT", 0)
+    report = index_folder(store, docs)
+    assert report.added == 2
+    record = store.get_document(str(docs.resolve() / "one.txt"))
+    assert record.content_hash == indexer.file_hash(docs / "one.txt")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_junction_loops_are_not_followed(store, docs):
+    loop = docs / "sub" / "loop"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(loop), str(docs)], capture_output=True
+    )
+    if result.returncode != 0:
+        pytest.skip("could not create a junction")
+    report = index_folder(store, docs)
+    assert report.added == 2
+    assert not any(Path(path).is_relative_to(loop) for path in store.all_paths())

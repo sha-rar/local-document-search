@@ -86,6 +86,9 @@ class IndexStore:
         self.connection.row_factory = sqlite3.Row
         # WAL lets the GUI read while a background indexer writes.
         self.connection.execute("PRAGMA journal_mode = WAL")
+        # With WAL, NORMAL can lose the last commits on power loss but never corrupts the
+        # index, and avoids a disk sync per commit.
+        self.connection.execute("PRAGMA synchronous = NORMAL")
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -187,15 +190,25 @@ class IndexStore:
         self.connection.execute("DELETE FROM documents_fts WHERE rowid = ?", (existing.id,))
         self.connection.execute("DELETE FROM documents WHERE id = ?", (existing.id,))
 
-    def paths_under(self, path: Path) -> list[str]:
-        """Indexed paths equal to ``path`` or inside it as a folder."""
+    def documents_under(self, path: Path) -> dict[str, DocumentRecord]:
+        """Indexed documents at ``path`` or inside it as a folder, keyed by path."""
         path_text = str(path)
         prefix = path_text if path_text.endswith(os.sep) else path_text + os.sep
         rows = self.connection.execute(
-            "SELECT path FROM documents WHERE path = ? OR substr(path, 1, ?) = ?",
+            "SELECT id, path, mtime, size, content_hash FROM documents"
+            " WHERE path = ? OR substr(path, 1, ?) = ?",
             (path_text, len(prefix), prefix),
         )
-        return [row["path"] for row in rows]
+        return {row["path"]: DocumentRecord(**row) for row in rows}
+
+    def paths_under(self, path: Path) -> list[str]:
+        """Indexed paths equal to ``path`` or inside it as a folder."""
+        return list(self.documents_under(path))
+
+    def delete_ids(self, document_ids: list[int]) -> None:
+        params = [(document_id,) for document_id in document_ids]
+        self.connection.executemany("DELETE FROM documents_fts WHERE rowid = ?", params)
+        self.connection.executemany("DELETE FROM documents WHERE id = ?", params)
 
     def all_paths(self) -> list[str]:
         return [row["path"] for row in self.connection.execute("SELECT path FROM documents")]

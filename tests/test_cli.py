@@ -114,11 +114,11 @@ def test_ctrl_c_stops_indexing_gracefully(tmp_path, capsys, monkeypatch):
     real_extract = indexer.extract_text
     calls = []
 
-    def interrupt_once(path):
+    def interrupt_once(path, data=None):
         calls.append(path)
         if len(calls) == 1:
             signal.raise_signal(signal.SIGINT)
-        return real_extract(path)
+        return real_extract(path, data)
 
     monkeypatch.setattr(indexer, "extract_text", interrupt_once)
     assert main(["--db", str(tmp_path / "index.db"), "index", str(docs)]) == 130
