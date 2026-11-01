@@ -4,12 +4,22 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QMainWindow, QSplitter, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..indexer import IndexReport, remove_folder
+from ..search import SearchHit
 from ..storage import IndexStore
 from .folders import FolderPanel
 from .indexing import IndexJob, summarize
+from .opening import open_document, show_in_folder
 from .preview import PreviewPane
 from .search_panel import SearchPanel
 
@@ -31,12 +41,29 @@ class MainWindow(QMainWindow):
         self.results_list = self.search_panel.results_list
 
         self.preview = PreviewPane()
-        self.search_panel.result_selected.connect(self.preview.show_hit)
+        self.current_hit: SearchHit | None = None
+        self.open_button = QPushButton("Open")
+        self.open_button.clicked.connect(lambda: self.open_hit(self.current_hit))
+        self.show_button = QPushButton("Show in folder")
+        self.show_button.clicked.connect(lambda: self.show_hit_in_folder(self.current_hit))
+        self.search_panel.result_selected.connect(self._on_result_selected)
+        self.search_panel.result_activated.connect(self.open_hit)
+        self._on_result_selected(None)
+
+        preview_buttons = QHBoxLayout()
+        preview_buttons.addWidget(self.open_button)
+        preview_buttons.addWidget(self.show_button)
+        preview_buttons.addStretch()
+        preview_panel = QWidget()
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self.preview)
+        preview_layout.addLayout(preview_buttons)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.folder_panel)
         splitter.addWidget(self.search_panel)
-        splitter.addWidget(self.preview)
+        splitter.addWidget(preview_panel)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 480, 380])
         self.setCentralWidget(splitter)
@@ -69,6 +96,32 @@ class MainWindow(QMainWindow):
         self.index_job.deleteLater()
         self.index_job = None
         self.folder_panel.set_busy(False)
+
+    def open_hit(self, hit: SearchHit | None) -> None:
+        if hit is not None and self._check_exists(hit) and not open_document(Path(hit.path)):
+            self._warn(f"No application could open:\n{hit.path}")
+
+    def show_hit_in_folder(self, hit: SearchHit | None) -> None:
+        if hit is not None and self._check_exists(hit):
+            show_in_folder(Path(hit.path))
+
+    def _check_exists(self, hit: SearchHit) -> bool:
+        if Path(hit.path).exists():
+            return True
+        self._warn(
+            f"This file no longer exists:\n{hit.path}\n\n"
+            "It may have been moved or deleted. Choose Index now to update the results."
+        )
+        return False
+
+    def _warn(self, message: str) -> None:
+        QMessageBox.warning(self, "FileLens", message)
+
+    def _on_result_selected(self, hit: SearchHit | None) -> None:
+        self.current_hit = hit
+        self.preview.show_hit(hit)
+        self.open_button.setEnabled(hit is not None)
+        self.show_button.setEnabled(hit is not None)
 
     def _forget_folder(self, folder: Path) -> None:
         with IndexStore(self.db_path) as store:

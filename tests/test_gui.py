@@ -6,6 +6,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
 
+from local_document_search.gui import main_window  # noqa: E402
 from local_document_search.gui.main_window import MainWindow  # noqa: E402
 from local_document_search.gui.preview import (  # noqa: E402
     HIGHLIGHT_END,
@@ -189,3 +190,52 @@ def test_selecting_result_updates_preview(qtbot, window, docs):
     window.search_field.clear()
     window.search_panel.run_search()
     assert window.preview.toPlainText() == ""
+
+
+@pytest.fixture
+def opened(monkeypatch):
+    """Record open/show/warn calls instead of touching the OS."""
+    calls = {"open": [], "show": [], "warn": []}
+    monkeypatch.setattr(main_window, "open_document", lambda path: calls["open"].append(path) or True)
+    monkeypatch.setattr(main_window, "show_in_folder", lambda path: calls["show"].append(path))
+    monkeypatch.setattr(MainWindow, "_warn", lambda self, message: calls["warn"].append(message))
+    return calls
+
+
+def search_for(qtbot, window, docs, query):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    window.search_field.setText(query)
+    window.search_panel.run_search()
+
+
+def test_open_buttons_need_a_selection(window):
+    assert not window.open_button.isEnabled()
+    assert not window.show_button.isEnabled()
+
+
+def test_activating_result_opens_document(qtbot, window, docs, opened):
+    search_for(qtbot, window, docs, "alpha")
+    window.results_list.setFocus()
+    qtbot.keyClick(window.results_list, Qt.Key.Key_Return)
+    assert opened["open"] == [(docs / "a.txt").resolve()]
+
+
+def test_buttons_open_and_reveal_selected_result(qtbot, window, docs, opened):
+    search_for(qtbot, window, docs, "beta")
+    assert window.open_button.isEnabled()
+    window.open_button.click()
+    window.show_button.click()
+    expected = (docs / "nested" / "b.md").resolve()
+    assert opened["open"] == [expected]
+    assert opened["show"] == [expected]
+
+
+def test_missing_file_warns_instead_of_opening(qtbot, window, docs, opened):
+    search_for(qtbot, window, docs, "alpha")
+    (docs / "a.txt").unlink()
+    window.open_button.click()
+    window.show_button.click()
+    assert opened["open"] == [] and opened["show"] == []
+    assert len(opened["warn"]) == 2
+    assert "no longer exists" in opened["warn"][0]
