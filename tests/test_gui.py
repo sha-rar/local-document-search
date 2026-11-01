@@ -7,6 +7,13 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 
 from local_document_search.gui.main_window import MainWindow  # noqa: E402
+from local_document_search.gui.preview import (  # noqa: E402
+    HIGHLIGHT_END,
+    HIGHLIGHT_START,
+    highlight_snippet,
+    render_preview,
+)
+from local_document_search.search import SearchHit  # noqa: E402
 from local_document_search.storage import IndexStore  # noqa: E402
 
 
@@ -140,3 +147,45 @@ def test_results_refresh_after_indexing(qtbot, window, docs):
     window.folder_panel.add_folder(docs)
     index_and_wait(qtbot, window)
     assert window.results_list.count() == 2
+
+
+def test_highlight_snippet_escapes_document_text():
+    snippet = f"a <b>tag</b> & {HIGHLIGHT_START}budget{HIGHLIGHT_END}\n  plan"
+    rendered = highlight_snippet(snippet)
+    assert "&lt;b&gt;tag&lt;/b&gt; &amp;" in rendered
+    assert ">budget</span> plan" in rendered
+    assert HIGHLIGHT_START not in rendered and HIGHLIGHT_END not in rendered
+
+
+def test_render_preview_shows_details():
+    hit = SearchHit(
+        path=str(Path("C:/docs/report.pdf")),
+        snippet=f"{HIGHLIGHT_START}Revenue{HIGHLIGHT_END} grew",
+        mtime=1717200000.0,
+        size=2048,
+        score=-1.0,
+    )
+    rendered = render_preview(hit)
+    assert "<h3>report.pdf</h3>" in rendered
+    assert "PDF" in rendered and "2.0 KB" in rendered
+    assert ">Revenue</span> grew" in rendered
+
+
+def test_selecting_result_updates_preview(qtbot, window, docs):
+    (docs / "c.txt").write_text("<script>budget</script> notes", encoding="utf-8")
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    window.search_field.setText("alpha budget")
+    window.search_panel.run_search()
+
+    # The top result is selected automatically.
+    text = window.preview.toPlainText()
+    assert "a.txt" in text and "alpha budget" in text
+
+    window.search_field.setText("script")
+    window.search_panel.run_search()
+    assert "<script>budget</script>" in window.preview.toPlainText()
+
+    window.search_field.clear()
+    window.search_panel.run_search()
+    assert window.preview.toPlainText() == ""

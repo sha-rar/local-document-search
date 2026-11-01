@@ -4,12 +4,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QMainWindow, QSplitter, QTextBrowser, QWidget
+from PySide6.QtWidgets import QMainWindow, QSplitter, QWidget
 
 from ..indexer import IndexReport, remove_folder
 from ..storage import IndexStore
 from .folders import FolderPanel
 from .indexing import IndexJob, summarize
+from .preview import PreviewPane
 from .search_panel import SearchPanel
 
 
@@ -29,8 +30,8 @@ class MainWindow(QMainWindow):
         self.search_field = self.search_panel.search_field
         self.results_list = self.search_panel.results_list
 
-        self.preview = QTextBrowser()
-        self.preview.setPlaceholderText("Select a result to preview it.")
+        self.preview = PreviewPane()
+        self.search_panel.result_selected.connect(self.preview.show_hit)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.folder_panel)

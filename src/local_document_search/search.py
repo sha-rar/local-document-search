@@ -84,7 +84,10 @@ def search(
     query: str,
     limit: int = 20,
     filters: SearchFilters | None = None,
+    highlight: tuple[str, str] = (SNIPPET_START, SNIPPET_END),
+    snippet_tokens: int = SNIPPET_TOKENS,
 ) -> list[SearchHit]:
+    """Return ranked hits; ``highlight`` wraps matched terms in each snippet."""
     fts_query = build_fts_query(query)
     if not fts_query:
         return []
@@ -101,10 +104,9 @@ def search(
         LIMIT ?
         """,
         (
-            SNIPPET_START,
-            SNIPPET_END,
+            *highlight,
             SNIPPET_ELLIPSIS,
-            SNIPPET_TOKENS,
+            snippet_tokens,
             NAME_WEIGHT,
             CONTENT_WEIGHT,
             fts_query,

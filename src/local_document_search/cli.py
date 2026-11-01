@@ -5,6 +5,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
+from .formatting import format_size
 from .indexer import index_folder, prune_missing
 from .search import SearchFilters, search
 from .storage import IndexStore, default_db_path
@@ -70,15 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
         "disconnected drive count as missing and are removed too.",
     )
     return parser
-
-
-def format_size(size: int) -> str:
-    value = float(size)
-    for unit in ("B", "KB", "MB"):
-        if value < 1024:
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} GB"
 
 
 def run_index(db_path: Path, folder: Path) -> int:

@@ -17,11 +17,10 @@ from PySide6.QtWidgets import (
 from ..extractors import EXTRACTORS
 from ..search import SearchFilters, SearchHit, search
 from ..storage import IndexStore
+from .preview import HIGHLIGHT_END, HIGHLIGHT_START, PREVIEW_SNIPPET_TOKENS, TYPE_LABELS
 
 DEFAULT_RESULT_LIMIT = 100
 SEARCH_DELAY_MS = 250
-
-TYPE_LABELS = {".txt": "Text", ".md": "Markdown", ".pdf": "PDF", ".docx": "Word"}
 
 
 class SearchPanel(QWidget):
@@ -51,6 +50,8 @@ class SearchPanel(QWidget):
         self.count_label = QLabel()
         self.results_list = QListWidget()
         self.results_list.setAlternatingRowColors(True)
+        self.results_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.results_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.results_list.currentItemChanged.connect(self._on_current_changed)
         self.results_list.itemActivated.connect(
             lambda item: self.result_activated.emit(item.data(Qt.ItemDataRole.UserRole))
@@ -86,7 +87,14 @@ class SearchPanel(QWidget):
             self.count_label.setText("Nothing indexed yet. Add a folder and choose Index now.")
             return
         with IndexStore(self.db_path) as store:
-            hits = search(store, query, self.result_limit, self.filters())
+            hits = search(
+                store,
+                query,
+                self.result_limit,
+                self.filters(),
+                highlight=(HIGHLIGHT_START, HIGHLIGHT_END),
+                snippet_tokens=PREVIEW_SNIPPET_TOKENS,
+            )
         for hit in hits:
             path = Path(hit.path)
             item = QListWidgetItem(f"{path.name}\n{path.parent}")
@@ -94,6 +102,8 @@ class SearchPanel(QWidget):
             item.setToolTip(hit.path)
             self.results_list.addItem(item)
         self.count_label.setText(self._count_text(len(hits)))
+        if hits:
+            self.results_list.setCurrentRow(0)
 
     def hits(self) -> list[SearchHit]:
         return [

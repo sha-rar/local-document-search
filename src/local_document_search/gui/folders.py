@@ -25,6 +25,8 @@ class FolderPanel(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.folder_list = QListWidget()
+        self.folder_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.folder_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.folder_list.itemSelectionChanged.connect(self._update_buttons)
 
         self.add_button = QPushButton("Add folder…")
