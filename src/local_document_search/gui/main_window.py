@@ -4,20 +4,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import (
-    QLineEdit,
-    QListWidget,
-    QMainWindow,
-    QSplitter,
-    QTextBrowser,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QMainWindow, QSplitter, QTextBrowser, QWidget
 
 from ..indexer import IndexReport, remove_folder
 from ..storage import IndexStore
 from .folders import FolderPanel
 from .indexing import IndexJob, summarize
+from .search_panel import SearchPanel
 
 
 class MainWindow(QMainWindow):
@@ -32,23 +25,16 @@ class MainWindow(QMainWindow):
         self.folder_panel.index_requested.connect(self.start_indexing)
         self.folder_panel.folder_removed.connect(self._forget_folder)
 
-        self.search_field = QLineEdit()
-        self.search_field.setPlaceholderText("Search document contents")
-        self.search_field.setClearButtonEnabled(True)
-        self.results_list = QListWidget()
-
-        search_panel = QWidget()
-        search_layout = QVBoxLayout(search_panel)
-        search_layout.setContentsMargins(0, 0, 0, 0)
-        search_layout.addWidget(self.search_field)
-        search_layout.addWidget(self.results_list)
+        self.search_panel = SearchPanel(self.db_path)
+        self.search_field = self.search_panel.search_field
+        self.results_list = self.search_panel.results_list
 
         self.preview = QTextBrowser()
         self.preview.setPlaceholderText("Select a result to preview it.")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.folder_panel)
-        splitter.addWidget(search_panel)
+        splitter.addWidget(self.search_panel)
         splitter.addWidget(self.preview)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 480, 380])
@@ -73,6 +59,7 @@ class MainWindow(QMainWindow):
         if missing:
             message += f"; skipped {len(missing)} missing folder(s)"
         self.statusBar().showMessage(message)
+        self.search_panel.run_search()
 
     def _on_index_failed(self, error: str) -> None:
         self.statusBar().showMessage(f"Indexing failed: {error}")
@@ -86,6 +73,7 @@ class MainWindow(QMainWindow):
         with IndexStore(self.db_path) as store:
             removed = remove_folder(store, folder, keep=self.folder_panel.folders())
         self.statusBar().showMessage(f"Removed {removed} document(s) from {folder}")
+        self.search_panel.run_search()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # The worker thread must finish before its QThread is destroyed.

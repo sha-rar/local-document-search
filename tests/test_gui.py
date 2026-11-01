@@ -1,6 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("PySide6")
+
+from PySide6.QtCore import Qt  # noqa: E402
 
 from local_document_search.gui.main_window import MainWindow  # noqa: E402
 from local_document_search.storage import IndexStore  # noqa: E402
@@ -89,3 +93,50 @@ def test_removing_folder_drops_its_documents(qtbot, window, docs):
     # b.md is still covered by the nested folder.
     assert indexed_count(window) == 1
     assert panel.folders() == [(docs / "nested").resolve()]
+
+
+def result_names(window):
+    return [Path(hit.path).name for hit in window.search_panel.hits()]
+
+
+def test_search_before_indexing_explains(window):
+    window.search_field.setText("budget")
+    window.search_panel.run_search()
+    assert "Nothing indexed yet" in window.search_panel.count_label.text()
+
+
+def test_typing_searches_after_a_pause(qtbot, window, docs):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+
+    window.search_field.setText("budget")
+    qtbot.waitUntil(lambda: window.results_list.count() == 2, timeout=2000)
+    assert sorted(result_names(window)) == ["a.txt", "b.md"]
+    assert window.search_panel.count_label.text() == "2 results."
+
+    qtbot.keyClicks(window.search_field, " alpha")
+    qtbot.keyClick(window.search_field, Qt.Key.Key_Return)
+    assert result_names(window) == ["a.txt"]
+
+    window.search_field.clear()
+    window.search_panel.run_search()
+    assert window.results_list.count() == 0
+
+
+def test_type_filter_narrows_results(qtbot, window, docs):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    window.search_field.setText("budget")
+    window.search_panel.run_search()
+
+    combo = window.search_panel.type_filter
+    combo.setCurrentIndex(combo.findData(".md"))
+    assert result_names(window) == ["b.md"]
+
+
+def test_results_refresh_after_indexing(qtbot, window, docs):
+    window.search_field.setText("budget")
+    window.search_panel.run_search()
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    assert window.results_list.count() == 2
