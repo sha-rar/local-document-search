@@ -93,6 +93,10 @@ class IndexStore:
         has_tables = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
         ).fetchone()
+        if has_tables and version == SCHEMA_VERSION:
+            # Opening an up-to-date index must not write: a write would wait on any
+            # connection that is mid-transaction (e.g. a running indexer).
+            return
         with self.connection:
             if not has_tables:
                 self.connection.executescript(SCHEMA)

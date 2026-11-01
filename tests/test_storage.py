@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 from local_document_search.storage import SCHEMA_VERSION, IndexStore
 
@@ -62,3 +63,17 @@ def test_migrates_v0_database(tmp_path):
         assert metadata(store, path) == ("todo.md", ".md", str(tmp_path / "notes"), 10, 5.0)
         assert store.get_document(path).content_hash is None
         assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_opening_does_not_wait_for_a_writer(tmp_path):
+    db = tmp_path / "index.db"
+    with IndexStore(db) as writer:
+        writer.upsert_document(str(tmp_path / "saved.txt"), 1.0, 1, "saved")
+        writer.commit()
+        # Leave a write transaction open, as a running indexer does between commits.
+        writer.upsert_document(str(tmp_path / "pending.txt"), 1.0, 1, "pending")
+
+        started = time.monotonic()
+        with IndexStore(db) as reader:
+            assert reader.all_paths() == [str(tmp_path / "saved.txt")]
+        assert time.monotonic() - started < 1.0
