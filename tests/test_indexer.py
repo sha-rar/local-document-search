@@ -1,8 +1,15 @@
 import os
+import threading
 
 import pytest
 from local_document_search import indexer
-from local_document_search.indexer import index_folder, prune_missing, remove_folder, update_paths
+from local_document_search.indexer import (
+    IndexControl,
+    index_folder,
+    prune_missing,
+    remove_folder,
+    update_paths,
+)
 from local_document_search.storage import IndexStore
 
 
@@ -205,3 +212,52 @@ def test_update_paths_ignores_outside_and_excluded(store, tmp_path, docs):
         store, [outside.resolve(), private.resolve()], [docs], exclude=[docs / "sub"]
     )
     assert report.added == 0 and store.document_count() == 0
+
+
+def test_cancel_keeps_progress_and_skips_removal(store, docs):
+    index_folder(store, docs)
+    (docs / "one.txt").unlink()
+    for n in range(5):
+        (docs / f"new{n}.txt").write_text("x", encoding="utf-8")
+    control = IndexControl()
+    seen = []
+
+    def cancel_after_two(path):
+        seen.append(path)
+        if len(seen) == 2:
+            control.cancel()
+
+    report = index_folder(store, docs, progress=cancel_after_two, control=control)
+    assert report.cancelled
+    assert report.removed == 0  # one.txt's entry survives: the scan was incomplete
+    assert report.added + report.unchanged == 2
+    assert store.get_document(str(docs.resolve() / "one.txt")) is not None
+
+
+def test_pause_blocks_until_resumed(store, tmp_path, docs):
+    control = IndexControl()
+    control.pause()
+    result = {}
+
+    def run():
+        # SQLite connections belong to the thread that opened them.
+        with IndexStore(tmp_path / "paused.db") as own_store:
+            result["report"] = index_folder(own_store, docs, control=control)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(0.3)
+    assert thread.is_alive() and control.paused
+
+    control.resume()
+    thread.join(5)
+    assert result["report"].added == 2 and not result["report"].cancelled
+
+
+def test_cancel_wakes_a_paused_indexer(tmp_path, docs):
+    control = IndexControl()
+    control.pause()
+    control.cancel()
+    assert not control.paused
+    with IndexStore(tmp_path / "index.db") as store:
+        assert index_folder(store, docs, control=control).cancelled

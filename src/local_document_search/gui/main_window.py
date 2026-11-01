@@ -107,8 +107,16 @@ class MainWindow(QMainWindow):
         self.errors_button.setFlat(True)
         self.errors_button.clicked.connect(self.show_index_errors)
         self.errors_button.hide()
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_indexing)
+        for button in (self.pause_button, self.cancel_button):
+            button.hide()
         self.statusBar().addPermanentWidget(self.errors_button)
         self.statusBar().addPermanentWidget(self.progress_bar)
+        self.statusBar().addPermanentWidget(self.pause_button)
+        self.statusBar().addPermanentWidget(self.cancel_button)
         self.statusBar().showMessage("Ready")
         self.restart_monitor()
 
@@ -131,7 +139,31 @@ class MainWindow(QMainWindow):
         self.index_job.failed.connect(self._on_index_failed)
         self.index_job.done.connect(self._on_index_done)
         self.folder_panel.set_busy(True)
+        if changed_paths is None:
+            self.pause_button.setText("Pause")
+            self.pause_button.show()
+            self.cancel_button.show()
         self.index_job.start()
+
+    def toggle_pause(self) -> None:
+        if self.index_job is None:
+            return
+        control = self.index_job.control
+        if control.paused:
+            control.resume()
+            self.pause_button.setText("Pause")
+            self.statusBar().showMessage("Resuming…")
+        else:
+            control.pause()
+            self.pause_button.setText("Resume")
+            self.statusBar().showMessage("Paused. Already-indexed documents remain searchable.")
+
+    def cancel_indexing(self) -> None:
+        if self.index_job is not None:
+            self.index_job.cancel()
+            self.pause_button.hide()
+            self.cancel_button.setEnabled(False)
+            self.statusBar().showMessage("Stopping after the current file…")
 
     def restart_monitor(self) -> None:
         """Watch the current folders, or stop watching if monitoring is turned off."""
@@ -199,6 +231,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Finding documents…")
 
     def _on_index_progress(self, done: int, total: int, current: str) -> None:
+        control = self.index_job.control if self.index_job is not None else None
+        if control is not None and (control.paused or control.cancelled):
+            return  # keep the paused/stopping message
         total = max(total, done, 1)
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(done)
@@ -213,6 +248,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Index updated: {summarize(reports)}")
             # Keep the last full scan's problems and add any new ones.
             self.index_errors.extend(errors)
+        elif self.index_job.control.cancelled:
+            message = f"Indexing cancelled: {summarize(reports)}"
+            self.statusBar().showMessage(message)
+            self.index_errors = errors
         else:
             message = f"Indexing complete: {summarize(reports)}"
             if missing:
@@ -232,6 +271,9 @@ class MainWindow(QMainWindow):
         self.index_job.deleteLater()
         self.index_job = None
         self.progress_bar.hide()
+        self.pause_button.hide()
+        self.cancel_button.hide()
+        self.cancel_button.setEnabled(True)
         self.folder_panel.set_busy(False)
         self._apply_pending_changes()
 
@@ -272,7 +314,9 @@ class MainWindow(QMainWindow):
         if self.monitor is not None:
             self.monitor.stop()
             self.monitor = None
-        # The worker thread must finish before its QThread is destroyed.
+        # The worker thread must finish before its QThread is destroyed; cancelling
+        # first means that only takes as long as the current file.
         if self.index_job is not None:
+            self.index_job.cancel()
             self.index_job.wait()
         super().closeEvent(event)

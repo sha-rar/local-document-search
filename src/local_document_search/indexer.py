@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,48 @@ class IndexReport:
     removed: int = 0
     unsupported: int = 0
     failed: list[tuple[Path, str]] = field(default_factory=list)
+    cancelled: bool = False
+
+
+class IndexCancelled(Exception):
+    """Raised at a checkpoint once indexing has been cancelled."""
+
+
+class IndexControl:
+    """Lets another thread pause, resume or cancel a running index operation.
+
+    The indexer calls ``checkpoint()`` between files; it blocks while paused and raises
+    ``IndexCancelled`` once cancelled.
+    """
+
+    def __init__(self):
+        self._cancelled = threading.Event()
+        self._running = threading.Event()
+        self._running.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._running.is_set()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        self._running.set()  # wake a paused indexer so it can stop
+
+    def pause(self) -> None:
+        if not self.cancelled:
+            self._running.clear()
+
+    def resume(self) -> None:
+        self._running.set()
+
+    def checkpoint(self) -> None:
+        self._running.wait()
+        if self._cancelled.is_set():
+            raise IndexCancelled
 
 
 def is_excluded(path: Path, excluded: Iterable[Path]) -> bool:
@@ -114,29 +157,44 @@ def index_folder(
     root: Path,
     progress: Callable[[Path], None] | None = None,
     exclude: Iterable[Path] = (),
+    control: IndexControl | None = None,
 ) -> IndexReport:
     """Index supported files under ``root``, skipping folders in ``exclude``.
 
     Unchanged files are skipped, moved or renamed files keep their extracted text, and
     documents under ``root`` that no longer exist or are now excluded are removed.
+
+    If ``control`` is cancelled, work done so far is kept and ``report.cancelled`` is set;
+    removal is skipped because the scan didn't see every file.
     """
     root = Path(root).resolve()
     report = IndexReport()
     seen: set[str] = set()
     pending = 0
 
-    for path in iter_files(root, report.failed, exclude):
-        if not is_supported(path):
-            report.unsupported += 1
-            continue
-        if progress:
-            progress(path)
-        seen.add(str(path))
-        if _index_file(store, path, report):
-            pending += 1
-        if pending >= COMMIT_EVERY:
-            store.commit()
-            pending = 0
+    try:
+        for path in iter_files(root, report.failed, exclude):
+            if not is_supported(path):
+                report.unsupported += 1
+                continue
+            if control:
+                if control.paused:
+                    # Make finished work visible to searches before waiting.
+                    store.commit()
+                    pending = 0
+                control.checkpoint()
+            if progress:
+                progress(path)
+            seen.add(str(path))
+            if _index_file(store, path, report):
+                pending += 1
+            if pending >= COMMIT_EVERY:
+                store.commit()
+                pending = 0
+    except IndexCancelled:
+        store.commit()
+        report.cancelled = True
+        return report
 
     for key in store.all_paths():
         if key not in seen and Path(key).is_relative_to(root):

@@ -1,12 +1,13 @@
 """Command-line interface for indexing folders and searching their contents."""
 
 import argparse
+import signal
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
 from .formatting import format_size
-from .indexer import index_folder, prune_missing
+from .indexer import IndexControl, index_folder, prune_missing
 from .search import SearchFilters, search
 from .storage import IndexStore, default_db_path
 
@@ -85,19 +86,32 @@ def run_index(db_path: Path, folder: Path, exclude: list[Path]) -> int:
     if not folder.is_dir():
         print(f"error: not a directory: {folder}", file=sys.stderr)
         return 1
-    with IndexStore(db_path) as store:
-        report = index_folder(store, folder, exclude=exclude)
-        total = store.document_count()
+    control = IndexControl()
 
+    def on_interrupt(signum, frame):
+        if control.cancelled:
+            raise KeyboardInterrupt  # second Ctrl+C: stop immediately
+        control.cancel()
+        print("Stopping after the current file (Ctrl+C again to abort)…", file=sys.stderr)
+
+    previous_handler = signal.signal(signal.SIGINT, on_interrupt)
+    try:
+        with IndexStore(db_path) as store:
+            report = index_folder(store, folder, exclude=exclude, control=control)
+            total = store.document_count()
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+
+    verb = "Cancelled indexing" if report.cancelled else "Indexed"
     print(
-        f"Indexed {folder.resolve()}: {report.added} added, {report.updated} updated, "
+        f"{verb} {folder.resolve()}: {report.added} added, {report.updated} updated, "
         f"{report.unchanged} unchanged, {report.moved} moved, {report.removed} removed, "
         f"{report.unsupported} unsupported, {len(report.failed)} failed."
     )
     for path, reason in report.failed:
         print(f"  failed: {path}: {reason}", file=sys.stderr)
     print(f"{total} documents in index ({db_path}).")
-    return 0
+    return 130 if report.cancelled else 0  # 130 is the conventional exit code for Ctrl+C
 
 
 def run_prune(db_path: Path) -> int:

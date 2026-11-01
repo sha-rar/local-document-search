@@ -406,3 +406,60 @@ def test_watching_can_be_turned_off(qtbot, window, docs, fast_monitor):
 def test_changes_to_index_files_are_ignored(qtbot, window, fast_monitor):
     window._on_files_changed({window.db_path.with_name("index.db-wal")})
     assert window.index_job is None and window.pending_changes == set()
+
+
+@pytest.fixture
+def slow_docs(docs, monkeypatch):
+    for n in range(20):
+        (docs / f"slow{n}.txt").write_text("filler", encoding="utf-8")
+    real_extract = indexer.extract_text
+
+    def slow_extract(path):
+        time.sleep(0.05)
+        return real_extract(path)
+
+    monkeypatch.setattr(indexer, "extract_text", slow_extract)
+    return docs
+
+
+def test_cancel_stops_indexing_and_keeps_progress(qtbot, window, slow_docs):
+    window.folder_panel.add_folder(slow_docs)
+    window.folder_panel.index_button.click()
+    assert window.cancel_button.isVisible() and window.pause_button.isVisible()
+    qtbot.waitUntil(lambda: window.progress_bar.value() >= 3, timeout=5000)
+
+    window.cancel_button.click()
+    qtbot.waitUntil(lambda: window.index_job is None, timeout=5000)
+    assert window.statusBar().currentMessage().startswith("Indexing cancelled")
+    assert 0 < indexed_count(window) < 22
+    assert window.cancel_button.isHidden() and window.pause_button.isHidden()
+    assert window.folder_panel.index_button.isEnabled()
+
+
+def test_pause_and_resume(qtbot, window, slow_docs):
+    window.folder_panel.add_folder(slow_docs)
+    window.folder_panel.index_button.click()
+    qtbot.waitUntil(lambda: window.progress_bar.value() >= 2, timeout=5000)
+
+    window.pause_button.click()
+    assert window.pause_button.text() == "Resume"
+    qtbot.wait(200)  # let the file in progress finish
+    paused_at = indexed_count(window)
+    assert paused_at >= 2  # work done before pausing is committed and searchable
+    qtbot.wait(300)
+    assert indexed_count(window) == paused_at
+    assert window.statusBar().currentMessage().startswith("Paused")
+
+    window.pause_button.click()
+    qtbot.waitUntil(lambda: window.index_job is None, timeout=10000)
+    assert indexed_count(window) == 22
+    assert window.statusBar().currentMessage().startswith("Indexing complete")
+
+
+def test_closing_during_indexing_cancels(qtbot, window, slow_docs):
+    window.folder_panel.add_folder(slow_docs)
+    window.folder_panel.index_button.click()
+    qtbot.waitUntil(lambda: window.progress_bar.value() >= 1, timeout=5000)
+    started = time.monotonic()
+    window.close()
+    assert time.monotonic() - started < 1.0

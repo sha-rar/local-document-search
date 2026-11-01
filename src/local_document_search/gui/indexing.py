@@ -7,7 +7,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..extractors import is_supported
-from ..indexer import IndexReport, index_folder, iter_files, update_paths
+from ..indexer import (
+    IndexCancelled,
+    IndexControl,
+    IndexReport,
+    index_folder,
+    iter_files,
+    update_paths,
+)
 from ..storage import IndexStore
 
 # Minimum seconds between progress signals, so large scans don't flood the event loop.
@@ -41,6 +48,7 @@ class IndexWorker(QObject):
         self.folders = list(folders)
         self.exclude = list(exclude)
         self.changed_paths = None if changed_paths is None else set(changed_paths)
+        self.control = IndexControl()
 
     @Slot()
     def run(self) -> None:
@@ -53,12 +61,13 @@ class IndexWorker(QObject):
         missing = [folder for folder in self.folders if folder not in present]
         try:
             self.counting.emit()
-            total = sum(
-                1
-                for folder in present
-                for path in iter_files(folder, exclude=self.exclude)
-                if is_supported(path)
-            )
+            total = 0
+            for folder in present:
+                for path in iter_files(folder, exclude=self.exclude):
+                    if is_supported(path):
+                        total += 1
+                        if total % 500 == 0:
+                            self.control.checkpoint()
             done = 0
             last_emit = 0.0
 
@@ -72,8 +81,13 @@ class IndexWorker(QObject):
 
             with IndexStore(self.db_path) as store:
                 for folder in present:
-                    reports.append((folder, index_folder(store, folder, on_file, self.exclude)))
+                    report = index_folder(store, folder, on_file, self.exclude, self.control)
+                    reports.append((folder, report))
+                    if report.cancelled:
+                        break
             self.progress.emit(done, max(total, done), "")
+        except IndexCancelled:
+            pass  # cancelled while counting; nothing was indexed
         except Exception as exc:  # noqa: BLE001 - report anything rather than kill the thread silently
             self.failed.emit(str(exc))
             return
@@ -110,6 +124,7 @@ class IndexJob(QObject):
         self.is_update = changed_paths is not None
         self.thread = QThread()
         self.worker = IndexWorker(db_path, folders, exclude, changed_paths)
+        self.control = self.worker.control
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.counting.connect(self.counting)
@@ -122,6 +137,9 @@ class IndexJob(QObject):
 
     def start(self) -> None:
         self.thread.start()
+
+    def cancel(self) -> None:
+        self.control.cancel()
 
     def wait(self) -> None:
         self.thread.quit()

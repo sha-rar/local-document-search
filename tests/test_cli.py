@@ -1,4 +1,7 @@
+import signal
+
 import pytest
+from local_document_search import indexer
 from local_document_search.cli import main
 
 
@@ -101,3 +104,25 @@ def test_search_without_index_fails(tmp_path, capsys):
     assert main(["--db", str(tmp_path / "missing.db"), "search", "x"]) == 1
     assert "no index" in capsys.readouterr().err
     assert not (tmp_path / "missing.db").exists()
+
+
+def test_ctrl_c_stops_indexing_gracefully(tmp_path, capsys, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for n in range(5):
+        (docs / f"f{n}.txt").write_text("x", encoding="utf-8")
+    real_extract = indexer.extract_text
+    calls = []
+
+    def interrupt_once(path):
+        calls.append(path)
+        if len(calls) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return real_extract(path)
+
+    monkeypatch.setattr(indexer, "extract_text", interrupt_once)
+    assert main(["--db", str(tmp_path / "index.db"), "index", str(docs)]) == 130
+    captured = capsys.readouterr()
+    assert "Stopping after the current file" in captured.err
+    assert "Cancelled indexing" in captured.out and "1 added" in captured.out
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
