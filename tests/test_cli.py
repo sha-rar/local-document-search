@@ -24,6 +24,34 @@ def test_index_then_search(tmp_path, capsys):
     assert "[budget]" in out
 
 
+def test_search_filters(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    (docs / "sub").mkdir(parents=True)
+    (docs / "a.txt").write_text("budget", encoding="utf-8")
+    (docs / "sub" / "b.md").write_text("budget", encoding="utf-8")
+    db = tmp_path / "index.db"
+    main(["--db", str(db), "index", str(docs)])
+    capsys.readouterr()
+
+    main(["--db", str(db), "search", "budget", "--type", "md"])
+    out = capsys.readouterr().out
+    assert "b.md" in out and "a.txt" not in out
+
+    main(["--db", str(db), "search", "budget", "--in", str(docs / "sub")])
+    out = capsys.readouterr().out
+    assert "b.md" in out and "a.txt" not in out
+
+    main(["--db", str(db), "search", "budget", "--before", "2000-01-01"])
+    assert "No matches." in capsys.readouterr().out
+
+
+def test_search_rejects_bad_date(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(tmp_path / "index.db"), "search", "x", "--after", "01/02/2024"])
+    assert exc.value.code == 2
+    assert "expected YYYY-MM-DD" in capsys.readouterr().err
+
+
 def test_search_reports_no_matches(tmp_path, capsys):
     docs = tmp_path / "docs"
     docs.mkdir()

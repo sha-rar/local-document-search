@@ -2,12 +2,25 @@
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .indexer import index_folder
-from .search import search
+from .search import SearchFilters, search
 from .storage import IndexStore, default_db_path
+
+
+def parse_date(value: str) -> float:
+    """Parse YYYY-MM-DD as a timestamp for local midnight at the start of that day."""
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid date '{value}', expected YYYY-MM-DD") from None
+    return datetime(day.year, day.month, day.day).timestamp()
+
+
+def parse_extensions(value: str) -> list[str]:
+    return [part for part in value.split(",") if part.strip()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +42,25 @@ def build_parser() -> argparse.ArgumentParser:
     search_command.add_argument("query", help='Words to find; use "quotes" for a phrase')
     search_command.add_argument(
         "-n", "--limit", type=int, default=20, help="Maximum results (default: 20)"
+    )
+    search_command.add_argument(
+        "-t",
+        "--type",
+        dest="types",
+        type=parse_extensions,
+        action="extend",
+        default=[],
+        metavar="EXT",
+        help="Only these file types, e.g. pdf or pdf,docx (repeatable)",
+    )
+    search_command.add_argument(
+        "--in", dest="folder", type=Path, metavar="FOLDER", help="Only files under this folder"
+    )
+    search_command.add_argument(
+        "--after", type=parse_date, metavar="DATE", help="Only files modified on or after YYYY-MM-DD"
+    )
+    search_command.add_argument(
+        "--before", type=parse_date, metavar="DATE", help="Only files modified before YYYY-MM-DD"
     )
     return parser
 
@@ -61,12 +93,12 @@ def run_index(db_path: Path, folder: Path) -> int:
     return 0
 
 
-def run_search(db_path: Path, query: str, limit: int) -> int:
+def run_search(db_path: Path, query: str, limit: int, filters: SearchFilters) -> int:
     if not db_path.exists():
         print(f"error: no index at {db_path}; run 'docsearch index <folder>' first", file=sys.stderr)
         return 1
     with IndexStore(db_path) as store:
-        hits = search(store, query, limit)
+        hits = search(store, query, limit, filters)
 
     if not hits:
         print("No matches.")
@@ -83,4 +115,10 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db or default_db_path()
     if args.command == "index":
         return run_index(db_path, args.folder)
-    return run_search(db_path, args.query, args.limit)
+    filters = SearchFilters(
+        extensions=tuple(args.types),
+        folder=args.folder,
+        modified_after=args.after,
+        modified_before=args.before,
+    )
+    return run_search(db_path, args.query, args.limit, filters)

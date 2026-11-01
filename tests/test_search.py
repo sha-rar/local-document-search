@@ -1,7 +1,12 @@
+import os
+
 import pytest
 from local_document_search.indexer import index_folder
-from local_document_search.search import build_fts_query, search
+from local_document_search.search import SearchFilters, build_fts_query, search
 from local_document_search.storage import IndexStore
+
+JAN_2024 = 1704067200.0  # 2024-01-01 00:00 UTC
+JUN_2024 = 1717200000.0  # 2024-06-01 00:00 UTC
 
 
 @pytest.fixture
@@ -49,3 +54,60 @@ def test_filename_matches(store):
 def test_operator_characters_do_not_error(store):
     assert search(store, "fox* OR (NEAR") == []
     assert search(store, "") == []
+
+
+@pytest.fixture
+def filter_root(tmp_path):
+    """Files mentioning "invoice" spread across types, folders and dates."""
+    root = tmp_path / "filtered"
+    files = {
+        "work/jan.txt": JAN_2024,
+        "work/jun.md": JUN_2024,
+        "work/deep/jun.txt": JUN_2024,
+        "work2/jan.txt": JAN_2024,
+    }
+    for relative, mtime in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("invoice", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+    return root
+
+
+@pytest.fixture
+def filter_store(tmp_path, filter_root):
+    with IndexStore(tmp_path / "filtered.db") as store:
+        index_folder(store, filter_root)
+        yield store
+
+
+def found(store, filters, root):
+    hits = search(store, "invoice", filters=filters)
+    return sorted(os.path.relpath(hit.path, root).replace(os.sep, "/") for hit in hits)
+
+
+def test_filter_by_type(filter_store, filter_root):
+    assert found(filter_store, SearchFilters(extensions=("MD",)), filter_root) == ["work/jun.md"]
+    assert len(found(filter_store, SearchFilters(extensions=(".txt", "md")), filter_root)) == 4
+
+
+def test_filter_by_folder_includes_subfolders_only(filter_store, filter_root):
+    assert found(filter_store, SearchFilters(folder=filter_root / "work"), filter_root) == [
+        "work/deep/jun.txt",
+        "work/jan.txt",
+        "work/jun.md",
+    ]
+
+
+def test_filter_by_modified_date(filter_store, filter_root):
+    after = SearchFilters(modified_after=JUN_2024)
+    before = SearchFilters(modified_before=JUN_2024)
+    assert found(filter_store, after, filter_root) == ["work/deep/jun.txt", "work/jun.md"]
+    assert found(filter_store, before, filter_root) == ["work/jan.txt", "work2/jan.txt"]
+
+
+def test_filters_combine(filter_store, filter_root):
+    filters = SearchFilters(
+        extensions=("txt",), folder=filter_root / "work", modified_after=JUN_2024
+    )
+    assert found(filter_store, filters, filter_root) == ["work/deep/jun.txt"]
