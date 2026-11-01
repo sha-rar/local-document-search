@@ -66,6 +66,20 @@ def test_prune_removes_missing_files(tmp_path, capsys):
     assert "Removed 1 missing documents; 1 remain" in capsys.readouterr().out
 
 
+def test_index_exclude(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    (docs / "private").mkdir(parents=True)
+    (docs / "a.txt").write_text("budget", encoding="utf-8")
+    (docs / "private" / "b.txt").write_text("budget", encoding="utf-8")
+    db = tmp_path / "index.db"
+
+    main(["--db", str(db), "index", str(docs), "--exclude", str(docs / "private")])
+    assert "1 added" in capsys.readouterr().out
+    main(["--db", str(db), "search", "budget"])
+    out = capsys.readouterr().out
+    assert "a.txt" in out and "b.txt" not in out
+
+
 def test_search_reports_no_matches(tmp_path, capsys):
     docs = tmp_path / "docs"
     docs.mkdir()

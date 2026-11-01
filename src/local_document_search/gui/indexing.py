@@ -1,6 +1,7 @@
 """Run indexing on a worker thread so the GUI event loop stays responsive."""
 
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -24,10 +25,11 @@ class IndexWorker(QObject):
     finished = Signal(object, object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, folders: list[Path]):
+    def __init__(self, db_path: Path, folders: list[Path], exclude: Iterable[Path] = ()):
         super().__init__()
         self.db_path = db_path
         self.folders = list(folders)
+        self.exclude = list(exclude)
 
     @Slot()
     def run(self) -> None:
@@ -37,7 +39,12 @@ class IndexWorker(QObject):
         missing = [folder for folder in self.folders if folder not in present]
         try:
             self.counting.emit()
-            total = sum(1 for folder in present for path in iter_files(folder) if is_supported(path))
+            total = sum(
+                1
+                for folder in present
+                for path in iter_files(folder, exclude=self.exclude)
+                if is_supported(path)
+            )
             done = 0
             last_emit = 0.0
 
@@ -51,7 +58,7 @@ class IndexWorker(QObject):
 
             with IndexStore(self.db_path) as store:
                 for folder in present:
-                    reports.append((folder, index_folder(store, folder, on_file)))
+                    reports.append((folder, index_folder(store, folder, on_file, self.exclude)))
             self.progress.emit(done, max(total, done), "")
         except Exception as exc:  # noqa: BLE001 - report anything rather than kill the thread silently
             self.failed.emit(str(exc))
@@ -68,10 +75,16 @@ class IndexJob(QObject):
     failed = Signal(str)
     done = Signal()
 
-    def __init__(self, db_path: Path, folders: list[Path], parent: QObject | None = None):
+    def __init__(
+        self,
+        db_path: Path,
+        folders: list[Path],
+        exclude: Iterable[Path] = (),
+        parent: QObject | None = None,
+    ):
         super().__init__(parent)
         self.thread = QThread()
-        self.worker = IndexWorker(db_path, folders)
+        self.worker = IndexWorker(db_path, folders, exclude)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.counting.connect(self.counting)

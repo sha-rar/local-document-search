@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..indexer import IndexReport, remove_folder
 from ..search import SearchHit
+from ..settings import Settings, load_settings, save_settings
 from ..storage import IndexStore
 from .errors import IndexErrorsDialog
 from .folders import FolderPanel
@@ -24,21 +25,35 @@ from .indexing import IndexJob, collect_errors, summarize
 from .opening import open_document, show_in_folder
 from .preview import PreviewPane
 from .search_panel import SearchPanel
+from .settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_path: Path, parent: QWidget | None = None):
+    def __init__(
+        self,
+        db_path: Path,
+        settings_path: Path | None = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.db_path = Path(db_path)
+        # Settings live beside the index unless a location is given.
+        self.settings_path = Path(settings_path or self.db_path.with_name("settings.json"))
+        self.settings = load_settings(self.settings_path)
         self.index_job: IndexJob | None = None
         self.setWindowTitle("FileLens")
         self.resize(1100, 700)
+        self._build_menu()
 
         self.folder_panel = FolderPanel()
+        for folder in self.settings.folders:
+            self.folder_panel.add_folder(Path(folder))
         self.folder_panel.index_requested.connect(self.start_indexing)
+        self.folder_panel.folder_added.connect(self._save_folders)
         self.folder_panel.folder_removed.connect(self._forget_folder)
 
         self.search_panel = SearchPanel(self.db_path)
+        self.search_panel.result_limit = self.settings.result_limit
         self.search_field = self.search_panel.search_field
         self.results_list = self.search_panel.results_list
 
@@ -86,7 +101,8 @@ class MainWindow(QMainWindow):
         folders = self.folder_panel.folders()
         if self.index_job is not None or not folders:
             return
-        self.index_job = IndexJob(self.db_path, folders, self)
+        exclude = [Path(folder) for folder in self.settings.excluded_folders]
+        self.index_job = IndexJob(self.db_path, folders, exclude, parent=self)
         self.index_job.counting.connect(self._on_index_counting)
         self.index_job.progress.connect(self._on_index_progress)
         self.index_job.finished.connect(self._on_index_finished)
@@ -95,6 +111,33 @@ class MainWindow(QMainWindow):
         self.folder_panel.set_busy(True)
         self.errors_button.hide()
         self.index_job.start()
+
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(self.settings, self)
+        if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+            self.apply_settings(dialog.result_settings())
+
+    def apply_settings(self, settings: Settings) -> None:
+        self.settings = settings
+        save_settings(self.settings, self.settings_path)
+        self.search_panel.result_limit = settings.result_limit
+        self.search_panel.run_search()
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        self.settings_action = QAction("&Settings…", self)
+        self.settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
+        self.settings_action.triggered.connect(self.open_settings)
+        file_menu.addAction(self.settings_action)
+        file_menu.addSeparator()
+        quit_action = QAction("E&xit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+    def _save_folders(self) -> None:
+        self.settings.folders = [str(folder) for folder in self.folder_panel.folders()]
+        save_settings(self.settings, self.settings_path)
 
     def show_index_errors(self) -> None:
         IndexErrorsDialog(self.index_errors, self).exec()
@@ -161,6 +204,7 @@ class MainWindow(QMainWindow):
         self.show_button.setEnabled(hit is not None)
 
     def _forget_folder(self, folder: Path) -> None:
+        self._save_folders()
         with IndexStore(self.db_path) as store:
             removed = remove_folder(store, folder, keep=self.folder_panel.folders())
         self.statusBar().showMessage(f"Removed {removed} document(s) from {folder}")

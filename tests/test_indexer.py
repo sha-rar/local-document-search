@@ -136,3 +136,19 @@ def test_prune_removes_missing_files_outside_any_root(store, tmp_path, docs):
 
     assert prune_missing(store) == 1
     assert store.document_count() == 2
+
+
+def test_excluded_folders_are_skipped_and_removed(store, docs):
+    (docs / "sub" / "deeper").mkdir()
+    (docs / "sub" / "deeper" / "three.txt").write_text("gamma", encoding="utf-8")
+    index_folder(store, docs)
+    assert store.document_count() == 3
+
+    report = index_folder(store, docs, exclude=[docs / "sub"])
+    assert report.removed == 2
+    assert store.all_paths() == [str(docs.resolve() / "one.txt")]
+
+
+def test_excluding_the_root_indexes_nothing(store, docs):
+    report = index_folder(store, docs, exclude=[docs])
+    assert report.added == 0 and store.document_count() == 0

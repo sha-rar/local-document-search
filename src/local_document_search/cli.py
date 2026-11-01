@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     index_command = commands.add_parser("index", help="Index documents in a folder")
     index_command.add_argument("folder", type=Path, help="Folder to index")
+    index_command.add_argument(
+        "--exclude",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FOLDER",
+        help="Skip this folder and everything under it (repeatable)",
+    )
 
     search_command = commands.add_parser("search", help="Search indexed document contents")
     search_command.add_argument("query", help='Words to find; use "quotes" for a phrase')
@@ -73,12 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_index(db_path: Path, folder: Path) -> int:
+def run_index(db_path: Path, folder: Path, exclude: list[Path]) -> int:
     if not folder.is_dir():
         print(f"error: not a directory: {folder}", file=sys.stderr)
         return 1
     with IndexStore(db_path) as store:
-        report = index_folder(store, folder)
+        report = index_folder(store, folder, exclude=exclude)
         total = store.document_count()
 
     print(
@@ -124,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     db_path = args.db or default_db_path()
     if args.command == "index":
-        return run_index(db_path, args.folder)
+        return run_index(db_path, args.folder, args.exclude)
     if args.command == "prune":
         return run_prune(db_path)
     filters = SearchFilters(

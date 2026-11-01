@@ -16,10 +16,10 @@ from PySide6.QtWidgets import (
 
 from ..extractors import EXTRACTORS
 from ..search import SearchFilters, SearchHit, search
+from ..settings import DEFAULT_RESULT_LIMIT
 from ..storage import IndexStore
 from .preview import HIGHLIGHT_END, HIGHLIGHT_START, PREVIEW_SNIPPET_TOKENS, TYPE_LABELS
 
-DEFAULT_RESULT_LIMIT = 100
 SEARCH_DELAY_MS = 250
 
 

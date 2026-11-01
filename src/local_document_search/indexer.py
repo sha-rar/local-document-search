@@ -24,14 +24,31 @@ class IndexReport:
     failed: list[tuple[Path, str]] = field(default_factory=list)
 
 
-def iter_files(root: Path, errors: list[tuple[Path, str]] | None = None) -> Iterator[Path]:
-    """Recursively yield regular files under ``root``; unreadable directories go to ``errors``."""
+def is_excluded(path: Path, excluded: Iterable[Path]) -> bool:
+    return any(path.is_relative_to(folder) for folder in excluded)
+
+
+def iter_files(
+    root: Path,
+    errors: list[tuple[Path, str]] | None = None,
+    exclude: Iterable[Path] = (),
+) -> Iterator[Path]:
+    """Recursively yield regular files under ``root``, skipping ``exclude`` folders.
+
+    Unreadable directories go to ``errors``.
+    """
+    root = Path(root).resolve()
+    excluded = [Path(folder).resolve() for folder in exclude]
+    if is_excluded(root, excluded):
+        return
 
     def on_error(exc: OSError) -> None:
         if errors is not None:
             errors.append((Path(exc.filename), exc.strerror or str(exc)))
 
-    for dirpath, _dirnames, filenames in os.walk(root, onerror=on_error):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+        # Pruning dirnames in place stops os.walk from descending into excluded folders.
+        dirnames[:] = [name for name in dirnames if not is_excluded(Path(dirpath) / name, excluded)]
         for filename in filenames:
             yield Path(dirpath) / filename
 
@@ -56,18 +73,19 @@ def index_folder(
     store: IndexStore,
     root: Path,
     progress: Callable[[Path], None] | None = None,
+    exclude: Iterable[Path] = (),
 ) -> IndexReport:
-    """Index supported files under ``root``.
+    """Index supported files under ``root``, skipping folders in ``exclude``.
 
     Unchanged files are skipped, moved or renamed files keep their extracted text, and
-    documents under ``root`` that no longer exist are removed.
+    documents under ``root`` that no longer exist or are now excluded are removed.
     """
     root = Path(root).resolve()
     report = IndexReport()
     seen: set[str] = set()
     pending = 0
 
-    for path in iter_files(root, report.failed):
+    for path in iter_files(root, report.failed, exclude):
         if not is_supported(path):
             report.unsupported += 1
             continue

@@ -17,7 +17,9 @@ from local_document_search.gui.preview import (  # noqa: E402
     highlight_snippet,
     render_preview,
 )
+from local_document_search.gui.settings_dialog import SettingsDialog  # noqa: E402
 from local_document_search.search import SearchHit  # noqa: E402
+from local_document_search.settings import Settings, load_settings  # noqa: E402
 from local_document_search.storage import IndexStore  # noqa: E402
 
 
@@ -301,3 +303,65 @@ def test_indexing_problems_are_listed(qtbot, window, docs, tmp_path, monkeypatch
     rows = {table.item(row, 0).text(): table.item(row, 1).text() for row in range(table.rowCount())}
     assert rows[str(gone.resolve())] == "Folder not found; skipped"
     assert "cannot parse PDF" in rows[str((docs / "broken.pdf").resolve())]
+
+
+def test_folders_are_remembered(qtbot, tmp_path, docs):
+    first = MainWindow(tmp_path / "index.db")
+    qtbot.addWidget(first)
+    first.folder_panel.add_folder(docs)
+    first.folder_panel.add_folder(docs / "nested")
+    first.folder_panel.folder_list.setCurrentRow(1)
+    first.folder_panel.remove_selected()
+    first.close()
+
+    second = MainWindow(tmp_path / "index.db")
+    qtbot.addWidget(second)
+    assert second.folder_panel.folders() == [docs.resolve()]
+    assert load_settings(tmp_path / "settings.json").folders == [str(docs.resolve())]
+
+
+def test_settings_dialog_edits_preferences(qtbot, tmp_path):
+    original = Settings(folders=["D:/Docs"], excluded_folders=["D:/Old"], result_limit=100)
+    dialog = SettingsDialog(original)
+    qtbot.addWidget(dialog)
+    dialog.excluded_list.setCurrentRow(0)
+    dialog.remove_selected_exclusions()
+    dialog.add_exclusion(tmp_path)
+    dialog.add_exclusion(tmp_path)  # duplicates are ignored
+    dialog.result_limit.setValue(30)
+    dialog.index_on_startup.setChecked(True)
+
+    assert dialog.result_settings() == Settings(
+        folders=["D:/Docs"],
+        excluded_folders=[str(tmp_path.resolve())],
+        result_limit=30,
+        index_on_startup=True,
+    )
+    assert original.result_limit == 100  # the dialog doesn't modify the settings it was given
+
+
+def test_settings_menu_opens_dialog(qtbot, window, monkeypatch):
+    opened = []
+    monkeypatch.setattr(SettingsDialog, "exec", lambda dialog: opened.append(dialog) or 0)
+    window.settings_action.trigger()
+    assert len(opened) == 1
+
+
+def test_applied_settings_are_saved_and_used(qtbot, window, docs):
+    for n in range(15):
+        (docs / f"extra{n}.txt").write_text("budget", encoding="utf-8")
+    window.folder_panel.add_folder(docs)
+    window.apply_settings(
+        Settings(
+            folders=window.settings.folders,
+            excluded_folders=[str(docs / "nested")],
+            result_limit=10,
+        )
+    )
+    index_and_wait(qtbot, window)
+
+    assert indexed_count(window) == 16  # nested/b.md is excluded
+    window.search_field.setText("budget")
+    window.search_panel.run_search()
+    assert window.results_list.count() == 10
+    assert load_settings(window.settings_path).result_limit == 10
