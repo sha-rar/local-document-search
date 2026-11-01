@@ -7,6 +7,7 @@ import threading
 import pytest
 from local_document_search import indexer
 from local_document_search.indexer import (
+    Exclusions,
     IndexControl,
     index_folder,
     prune_missing,
@@ -285,3 +286,41 @@ def test_junction_loops_are_not_followed(store, docs):
     report = index_folder(store, docs)
     assert report.added == 2
     assert not any(Path(path).is_relative_to(loop) for path in store.all_paths())
+
+
+def test_exclusions_match_names_case_insensitively(tmp_path):
+    rules = Exclusions(
+        patterns=("~$*", "Node_Modules", "*.TMP"), extensions=("PDF", ".md")
+    ).resolved()
+    assert rules.excludes_file(Path("~$report.docx"))
+    assert rules.excludes_file(Path("draft.tmp"))
+    assert rules.excludes_file(Path("scan.pdf")) and rules.excludes_file(Path("notes.MD"))
+    assert not rules.excludes_file(Path("report.docx"))
+    assert rules.excludes_dir(Path("node_modules"))
+    assert rules.excludes_path(tmp_path / "node_modules" / "pkg" / "a.txt", tmp_path)
+    assert not rules.excludes_path(tmp_path / "src" / "a.txt", tmp_path)
+
+
+def test_patterns_and_types_are_skipped_and_removed(store, docs):
+    (docs / "~$lock.txt").write_text("lock", encoding="utf-8")
+    (docs / "node_modules" / "pkg").mkdir(parents=True)
+    (docs / "node_modules" / "pkg" / "readme.md").write_text("pkg", encoding="utf-8")
+    index_folder(store, docs)
+    assert store.document_count() == 4
+
+    rules = Exclusions(patterns=("~$*", "node_modules"), extensions=("md",))
+    report = index_folder(store, docs, exclude=rules)
+    assert report.removed == 3
+    assert store.all_paths() == [str(docs.resolve() / "one.txt")]
+
+
+def test_update_paths_respects_patterns_and_types(store, docs):
+    root = docs.resolve()
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "a.txt").write_text("x", encoding="utf-8")
+    (root / "keep.txt").write_text("x", encoding="utf-8")
+    (root / "skip.md").write_text("x", encoding="utf-8")
+    rules = Exclusions(patterns=("node_modules",), extensions=(".md",))
+    changed = [root / "node_modules" / "a.txt", root / "keep.txt", root / "skip.md"]
+    assert update_paths(store, changed, [docs], exclude=rules).added == 1
+    assert store.all_paths() == [str(root / "keep.txt")]

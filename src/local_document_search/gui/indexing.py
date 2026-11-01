@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..extractors import is_supported
 from ..indexer import (
+    Exclusions,
     IndexCancelled,
     IndexControl,
     IndexReport,
@@ -40,13 +41,13 @@ class IndexWorker(QObject):
         self,
         db_path: Path,
         folders: list[Path],
-        exclude: Iterable[Path] = (),
+        exclude: Exclusions | Iterable[Path] = (),
         changed_paths: Iterable[Path] | None = None,
     ):
         super().__init__()
         self.db_path = db_path
         self.folders = list(folders)
-        self.exclude = list(exclude)
+        self.exclude = Exclusions.from_any(exclude)
         self.changed_paths = None if changed_paths is None else set(changed_paths)
         self.control = IndexControl()
 
@@ -116,7 +117,7 @@ class IndexJob(QObject):
         self,
         db_path: Path,
         folders: list[Path],
-        exclude: Iterable[Path] = (),
+        exclude: Exclusions | Iterable[Path] = (),
         changed_paths: Iterable[Path] | None = None,
         parent: QObject | None = None,
     ):

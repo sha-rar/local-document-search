@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .formatting import format_size
-from .indexer import IndexControl, index_folder, prune_missing
+from .indexer import Exclusions, IndexControl, index_folder, prune_missing
 from .search import SearchFilters, search
 from .storage import IndexStore, default_db_path
 
@@ -47,6 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FOLDER",
         help="Skip this folder and everything under it (repeatable)",
     )
+    index_command.add_argument(
+        "--exclude-name",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Skip files and folders whose name matches, e.g. '~$*' or node_modules (repeatable)",
+    )
+    index_command.add_argument(
+        "--skip-type",
+        type=parse_extensions,
+        action="extend",
+        default=[],
+        metavar="EXT",
+        help="Skip these file types, e.g. pdf or pdf,docx (repeatable)",
+    )
 
     search_command = commands.add_parser("search", help="Search indexed document contents")
     search_command.add_argument("query", help='Words to find; use "quotes" for a phrase')
@@ -82,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_index(db_path: Path, folder: Path, exclude: list[Path]) -> int:
+def run_index(db_path: Path, folder: Path, exclusions: Exclusions) -> int:
     if not folder.is_dir():
         print(f"error: not a directory: {folder}", file=sys.stderr)
         return 1
@@ -97,7 +112,7 @@ def run_index(db_path: Path, folder: Path, exclude: list[Path]) -> int:
     previous_handler = signal.signal(signal.SIGINT, on_interrupt)
     try:
         with IndexStore(db_path) as store:
-            report = index_folder(store, folder, exclude=exclude, control=control)
+            report = index_folder(store, folder, exclude=exclusions, control=control)
             total = store.document_count()
     finally:
         signal.signal(signal.SIGINT, previous_handler)
@@ -146,7 +161,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     db_path = args.db or default_db_path()
     if args.command == "index":
-        return run_index(db_path, args.folder, args.exclude)
+        exclusions = Exclusions(
+            folders=tuple(args.exclude),
+            patterns=tuple(args.exclude_name),
+            extensions=tuple(args.skip_type),
+        )
+        return run_index(db_path, args.folder, exclusions)
     if args.command == "prune":
         return run_prune(db_path)
     filters = SearchFilters(

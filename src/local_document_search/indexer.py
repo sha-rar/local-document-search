@@ -1,5 +1,6 @@
 """Discover files and maintain an incremental index."""
 
+import fnmatch
 import hashlib
 import os
 import threading
@@ -73,6 +74,56 @@ class IndexControl:
             raise IndexCancelled
 
 
+@dataclass(frozen=True)
+class Exclusions:
+    """What to leave out of the index.
+
+    ``folders`` are skipped with everything under them. ``patterns`` are shell-style
+    wildcards (``*``, ``?``, ``[abc]``) matched case-insensitively against each file and
+    folder name, e.g. ``~$*`` or ``node_modules``. ``extensions`` skips file types.
+    """
+
+    folders: tuple[Path, ...] = ()
+    patterns: tuple[str, ...] = ()
+    extensions: tuple[str, ...] = ()
+
+    @classmethod
+    def from_any(cls, value: "Exclusions | Iterable[Path]") -> "Exclusions":
+        """Accept an ``Exclusions`` or, for convenience, a plain iterable of folders."""
+        return value if isinstance(value, cls) else cls(folders=tuple(value))
+
+    def resolved(self) -> "Exclusions":
+        return Exclusions(
+            folders=tuple(Path(folder).resolve() for folder in self.folders),
+            patterns=tuple(pattern.strip().lower() for pattern in self.patterns if pattern.strip()),
+            extensions=tuple(_normalize_extension(ext) for ext in self.extensions if ext.strip()),
+        )
+
+    def matches_name(self, name: str) -> bool:
+        name = name.lower()
+        return any(fnmatch.fnmatchcase(name, pattern) for pattern in self.patterns)
+
+    def excludes_dir(self, path: Path) -> bool:
+        return is_excluded(path, self.folders) or self.matches_name(path.name)
+
+    def excludes_file(self, path: Path) -> bool:
+        return path.suffix.lower() in self.extensions or self.matches_name(path.name)
+
+    def excludes_path(self, path: Path, root: Path) -> bool:
+        """Whether ``path`` (a file or folder under ``root``) or any folder above it is excluded."""
+        if is_excluded(path, self.folders):
+            return True
+        relative = path.relative_to(root).parts if path.is_relative_to(root) else (path.name,)
+        if any(self.matches_name(part) for part in relative):
+            return True
+        return not path.is_dir() and path.suffix.lower() in self.extensions
+
+
+def _normalize_extension(extension: str) -> str:
+    extension = extension.strip().lower()
+    return extension if extension.startswith(".") else "." + extension
+
+
 def is_excluded(path: Path, excluded: Iterable[Path]) -> bool:
     return any(path.is_relative_to(folder) for folder in excluded)
 
@@ -80,17 +131,17 @@ def is_excluded(path: Path, excluded: Iterable[Path]) -> bool:
 def scan_files(
     root: Path,
     errors: list[tuple[Path, str]] | None = None,
-    exclude: Iterable[Path] = (),
+    exclude: Exclusions | Iterable[Path] = (),
 ) -> Iterator[os.DirEntry]:
     """Recursively yield ``DirEntry`` objects for regular files under ``root``.
 
-    Excluded folders, symlinks and junctions are not followed; unreadable directories go
-    to ``errors``. On Windows ``entry.stat()`` is answered from the directory listing, so
-    it costs no extra system call.
+    Excluded folders and files, symlinks and junctions are skipped; unreadable directories
+    go to ``errors``. On Windows ``entry.stat()`` is answered from the directory listing,
+    so it costs no extra system call.
     """
     root = Path(root).resolve()
-    excluded = [Path(folder).resolve() for folder in exclude]
-    if is_excluded(root, excluded):
+    exclusions = Exclusions.from_any(exclude).resolved()
+    if is_excluded(root, exclusions.folders):
         return
     stack = [root]
     while stack:
@@ -105,9 +156,9 @@ def scan_files(
                             continue
                         if entry.is_dir():
                             child = Path(entry.path)
-                            if not is_excluded(child, excluded):
+                            if not exclusions.excludes_dir(child):
                                 stack.append(child)
-                        elif entry.is_file():
+                        elif entry.is_file() and not exclusions.excludes_file(Path(entry.path)):
                             yield entry
                     except OSError:
                         continue
@@ -119,9 +170,9 @@ def scan_files(
 def iter_files(
     root: Path,
     errors: list[tuple[Path, str]] | None = None,
-    exclude: Iterable[Path] = (),
+    exclude: Exclusions | Iterable[Path] = (),
 ) -> Iterator[Path]:
-    """Recursively yield regular files under ``root``, skipping ``exclude`` folders."""
+    """Recursively yield regular files under ``root`` that ``exclude`` doesn't rule out."""
     for entry in scan_files(root, errors, exclude):
         yield Path(entry.path)
 
@@ -200,10 +251,10 @@ def index_folder(
     store: IndexStore,
     root: Path,
     progress: Callable[[Path], None] | None = None,
-    exclude: Iterable[Path] = (),
+    exclude: Exclusions | Iterable[Path] = (),
     control: IndexControl | None = None,
 ) -> IndexReport:
-    """Index supported files under ``root``, skipping folders in ``exclude``.
+    """Index supported files under ``root``, skipping anything ``exclude`` rules out.
 
     Unchanged files are skipped, moved or renamed files keep their extracted text, and
     documents under ``root`` that no longer exist or are now excluded are removed.
@@ -264,22 +315,23 @@ def update_paths(
     store: IndexStore,
     paths: Iterable[Path],
     roots: Iterable[Path],
-    exclude: Iterable[Path] = (),
+    exclude: Exclusions | Iterable[Path] = (),
 ) -> IndexReport:
     """Apply changes to specific files or folders, e.g. reported by a filesystem watcher.
 
-    Paths outside ``roots`` or inside ``exclude`` are ignored. Existing paths are indexed
-    before missing ones are removed, so a move is recognised rather than re-extracted.
+    Paths outside ``roots`` or ruled out by ``exclude`` are ignored. Existing paths are
+    indexed before missing ones are removed, so a move is recognised rather than
+    re-extracted.
     """
     roots = [Path(root).resolve() for root in roots]
-    excluded = [Path(folder).resolve() for folder in exclude]
+    excluded = Exclusions.from_any(exclude).resolved()
     report = IndexReport()
-    relevant = {
-        Path(path)
-        for path in paths
-        if any(Path(path).is_relative_to(root) for root in roots)
-        and not is_excluded(Path(path), excluded)
-    }
+
+    def relevant_path(path: Path) -> bool:
+        root = next((root for root in roots if path.is_relative_to(root)), None)
+        return root is not None and not excluded.excludes_path(path, root)
+
+    relevant = {Path(path) for path in paths if relevant_path(Path(path))}
     present = sorted(path for path in relevant if path.exists())
     missing = sorted(path for path in relevant if not path.exists())
 

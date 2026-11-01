@@ -1,4 +1,4 @@
-"""Settings dialog: excluded folders and preferences."""
+"""Settings dialog: exclusions and preferences."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
     QSpinBox,
@@ -20,14 +21,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..extractors import EXTRACTORS
 from ..settings import MAX_RESULT_LIMIT, MIN_RESULT_LIMIT, Settings
+from .preview import TYPE_LABELS
 
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 420)
+        self.resize(560, 520)
         self._settings = settings
 
         self.excluded_list = QListWidget()
@@ -55,6 +58,27 @@ class SettingsDialog(QDialog):
         excluded_layout.addWidget(self.excluded_list)
         excluded_layout.addLayout(excluded_buttons)
 
+        self.patterns_field = QLineEdit(", ".join(settings.excluded_patterns))
+        self.patterns_field.setPlaceholderText("e.g. ~$*, *.tmp, node_modules")
+        self.patterns_field.setToolTip(
+            "Comma-separated names to skip. * matches any characters and ? matches one."
+        )
+        excluded_types = {ext.lower() for ext in settings.excluded_extensions}
+        self.type_checks: dict[str, QCheckBox] = {}
+        types_row = QHBoxLayout()
+        for extension in EXTRACTORS:
+            label = TYPE_LABELS.get(extension, extension.lstrip(".").upper())
+            check = QCheckBox(f"{label} ({extension})")
+            check.setChecked(extension not in excluded_types)
+            self.type_checks[extension] = check
+            types_row.addWidget(check)
+        types_row.addStretch()
+
+        skip_box = QGroupBox("Files to skip")
+        skip_layout = QFormLayout(skip_box)
+        skip_layout.addRow("Names matching", self.patterns_field)
+        skip_layout.addRow("Index these types", types_row)
+
         self.result_limit = QSpinBox()
         self.result_limit.setRange(MIN_RESULT_LIMIT, MAX_RESULT_LIMIT)
         self.result_limit.setSingleStep(10)
@@ -78,6 +102,7 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(excluded_box)
+        layout.addWidget(skip_box)
         layout.addWidget(preferences_box)
         layout.addWidget(buttons)
         self._update_buttons()
@@ -95,11 +120,20 @@ class SettingsDialog(QDialog):
     def excluded_folders(self) -> list[str]:
         return [self.excluded_list.item(row).text() for row in range(self.excluded_list.count())]
 
+    def excluded_patterns(self) -> list[str]:
+        patterns = (part.strip() for part in self.patterns_field.text().split(","))
+        return list(dict.fromkeys(pattern for pattern in patterns if pattern))
+
+    def excluded_extensions(self) -> list[str]:
+        return [ext for ext, check in self.type_checks.items() if not check.isChecked()]
+
     def result_settings(self) -> Settings:
         """The settings as edited, keeping fields this dialog doesn't show."""
         return replace(
             self._settings,
             excluded_folders=self.excluded_folders(),
+            excluded_patterns=self.excluded_patterns(),
+            excluded_extensions=self.excluded_extensions(),
             result_limit=self.result_limit.value(),
             index_on_startup=self.index_on_startup.isChecked(),
             watch_folders=self.watch_folders.isChecked(),

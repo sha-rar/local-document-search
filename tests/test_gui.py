@@ -463,3 +463,28 @@ def test_closing_during_indexing_cancels(qtbot, window, slow_docs):
     started = time.monotonic()
     window.close()
     assert time.monotonic() - started < 1.0
+
+
+def test_settings_dialog_edits_skip_rules(qtbot):
+    dialog = SettingsDialog(Settings(excluded_patterns=["~$*"], excluded_extensions=[".pdf"]))
+    qtbot.addWidget(dialog)
+    assert dialog.patterns_field.text() == "~$*"
+    assert not dialog.type_checks[".pdf"].isChecked()
+
+    dialog.patterns_field.setText(" ~$* , *.tmp,, node_modules, *.tmp ")
+    dialog.type_checks[".pdf"].setChecked(True)
+    dialog.type_checks[".md"].setChecked(False)
+    result = dialog.result_settings()
+    assert result.excluded_patterns == ["~$*", "*.tmp", "node_modules"]
+    assert result.excluded_extensions == [".md"]
+
+
+def test_gui_indexing_applies_skip_rules(qtbot, window, docs):
+    (docs / "~$a.txt").write_text("lock", encoding="utf-8")
+    window.folder_panel.add_folder(docs)
+    window.apply_settings(
+        Settings(folders=window.settings.folders, excluded_extensions=[".md"])
+    )
+    index_and_wait(qtbot, window)
+    # nested/b.md is skipped by type and ~$a.txt by the default pattern.
+    assert indexed_count(window) == 1

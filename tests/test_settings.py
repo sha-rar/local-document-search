@@ -3,6 +3,7 @@ import json
 from local_document_search.settings import (
     MAX_RESULT_LIMIT,
     Settings,
+    exclusions,
     load_settings,
     save_settings,
 )
@@ -51,3 +52,10 @@ def test_result_limit_is_clamped(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"result_limit": 10**6}), encoding="utf-8")
     assert load_settings(path).result_limit == MAX_RESULT_LIMIT
+
+
+def test_default_exclusions(tmp_path):
+    settings = load_settings(tmp_path / "absent.json")
+    assert settings.excluded_patterns == ["~$*", ".git", "node_modules"]
+    rules = exclusions(settings)
+    assert rules.patterns == ("~$*", ".git", "node_modules") and rules.extensions == ()

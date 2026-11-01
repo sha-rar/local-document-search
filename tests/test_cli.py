@@ -126,3 +126,14 @@ def test_ctrl_c_stops_indexing_gracefully(tmp_path, capsys, monkeypatch):
     assert "Stopping after the current file" in captured.err
     assert "Cancelled indexing" in captured.out and "1 added" in captured.out
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_index_exclude_names_and_types(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for name in ("a.txt", "~$a.txt", "b.md", "c.txt"):
+        (docs / name).write_text("budget", encoding="utf-8")
+    db = tmp_path / "index.db"
+
+    main(["--db", str(db), "index", str(docs), "--exclude-name", "~$*", "--skip-type", "md"])
+    assert "2 added" in capsys.readouterr().out

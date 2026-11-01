@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from ..indexer import IndexReport, remove_folder
 from ..monitor import FolderMonitor
 from ..search import SearchHit
-from ..settings import Settings, load_settings, save_settings
+from ..settings import Settings, exclusions, load_settings, save_settings
 from ..storage import IndexStore
 from .errors import IndexErrorsDialog
 from .folders import FolderPanel
@@ -129,9 +129,12 @@ class MainWindow(QMainWindow):
         self._start_job(changed_paths=None)
 
     def _start_job(self, changed_paths: set[Path] | None) -> None:
-        exclude = [Path(folder) for folder in self.settings.excluded_folders]
         self.index_job = IndexJob(
-            self.db_path, self.folder_panel.folders(), exclude, changed_paths, parent=self
+            self.db_path,
+            self.folder_panel.folders(),
+            exclusions(self.settings),
+            changed_paths,
+            parent=self,
         )
         self.index_job.counting.connect(self._on_index_counting)
         self.index_job.progress.connect(self._on_index_progress)

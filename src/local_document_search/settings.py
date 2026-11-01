@@ -6,20 +6,33 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from .indexer import Exclusions
 from .storage import default_db_path
 
 DEFAULT_RESULT_LIMIT = 100
 MIN_RESULT_LIMIT = 10
 MAX_RESULT_LIMIT = 1000
+DEFAULT_EXCLUDED_PATTERNS = ("~$*", ".git", "node_modules")
 
 
 @dataclass
 class Settings:
     folders: list[str] = field(default_factory=list)
     excluded_folders: list[str] = field(default_factory=list)
+    # Office lock files (~$*) can't be parsed; .git and node_modules are rarely wanted.
+    excluded_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_PATTERNS))
+    excluded_extensions: list[str] = field(default_factory=list)
     result_limit: int = DEFAULT_RESULT_LIMIT
     index_on_startup: bool = False
     watch_folders: bool = True
+
+
+def exclusions(settings: Settings) -> Exclusions:
+    return Exclusions(
+        folders=tuple(Path(folder) for folder in settings.excluded_folders),
+        patterns=tuple(settings.excluded_patterns),
+        extensions=tuple(settings.excluded_extensions),
+    )
 
 
 def default_settings_path() -> Path:
@@ -27,7 +40,7 @@ def default_settings_path() -> Path:
 
 
 def _valid(name: str, value: object) -> bool:
-    if name in ("folders", "excluded_folders"):
+    if name in ("folders", "excluded_folders", "excluded_patterns", "excluded_extensions"):
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     if name == "result_limit":
         return isinstance(value, int) and not isinstance(value, bool)
