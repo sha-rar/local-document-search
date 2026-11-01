@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -17,8 +18,9 @@ from PySide6.QtWidgets import (
 from ..indexer import IndexReport, remove_folder
 from ..search import SearchHit
 from ..storage import IndexStore
+from .errors import IndexErrorsDialog
 from .folders import FolderPanel
-from .indexing import IndexJob, summarize
+from .indexing import IndexJob, collect_errors, summarize
 from .opening import open_document, show_in_folder
 from .preview import PreviewPane
 from .search_panel import SearchPanel
@@ -68,6 +70,16 @@ class MainWindow(QMainWindow):
         splitter.setSizes([240, 480, 380])
         self.setCentralWidget(splitter)
 
+        self.index_errors: list[tuple[Path, str]] = []
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximumWidth(220)
+        self.progress_bar.hide()
+        self.errors_button = QPushButton()
+        self.errors_button.setFlat(True)
+        self.errors_button.clicked.connect(self.show_index_errors)
+        self.errors_button.hide()
+        self.statusBar().addPermanentWidget(self.errors_button)
+        self.statusBar().addPermanentWidget(self.progress_bar)
         self.statusBar().showMessage("Ready")
 
     def start_indexing(self) -> None:
@@ -75,18 +87,42 @@ class MainWindow(QMainWindow):
         if self.index_job is not None or not folders:
             return
         self.index_job = IndexJob(self.db_path, folders, self)
+        self.index_job.counting.connect(self._on_index_counting)
+        self.index_job.progress.connect(self._on_index_progress)
         self.index_job.finished.connect(self._on_index_finished)
         self.index_job.failed.connect(self._on_index_failed)
         self.index_job.done.connect(self._on_index_done)
         self.folder_panel.set_busy(True)
-        self.statusBar().showMessage(f"Indexing {len(folders)} folder(s)…")
+        self.errors_button.hide()
         self.index_job.start()
+
+    def show_index_errors(self) -> None:
+        IndexErrorsDialog(self.index_errors, self).exec()
+
+    def _on_index_counting(self) -> None:
+        self.progress_bar.setRange(0, 0)  # busy indicator until the total is known
+        self.progress_bar.show()
+        self.statusBar().showMessage("Finding documents…")
+
+    def _on_index_progress(self, done: int, total: int, current: str) -> None:
+        total = max(total, done, 1)
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
+        message = f"Indexing {done:,} of {total:,}"
+        if current:
+            message += f": {Path(current).name}"
+        self.statusBar().showMessage(message)
 
     def _on_index_finished(self, reports: list[tuple[Path, IndexReport]], missing: list[Path]) -> None:
         message = f"Indexing complete: {summarize(reports)}"
         if missing:
             message += f"; skipped {len(missing)} missing folder(s)"
         self.statusBar().showMessage(message)
+        self.index_errors = collect_errors(reports, missing)
+        if self.index_errors:
+            count = len(self.index_errors)
+            self.errors_button.setText(f"{count} problem{'s' if count != 1 else ''}…")
+            self.errors_button.show()
         self.search_panel.run_search()
 
     def _on_index_failed(self, error: str) -> None:
@@ -95,6 +131,7 @@ class MainWindow(QMainWindow):
     def _on_index_done(self) -> None:
         self.index_job.deleteLater()
         self.index_job = None
+        self.progress_bar.hide()
         self.folder_panel.set_busy(False)
 
     def open_hit(self, hit: SearchHit | None) -> None:

@@ -1,12 +1,15 @@
+import time
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
 
+from local_document_search import indexer  # noqa: E402
 from local_document_search.gui import main_window  # noqa: E402
+from local_document_search.gui.errors import IndexErrorsDialog  # noqa: E402
 from local_document_search.gui.main_window import MainWindow  # noqa: E402
 from local_document_search.gui.preview import (  # noqa: E402
     HIGHLIGHT_END,
@@ -239,3 +242,62 @@ def test_missing_file_warns_instead_of_opening(qtbot, window, docs, opened):
     assert opened["open"] == [] and opened["show"] == []
     assert len(opened["warn"]) == 2
     assert "no longer exists" in opened["warn"][0]
+
+
+def test_progress_reaches_total(qtbot, window, docs):
+    window.folder_panel.add_folder(docs)
+    seen = []
+    window.folder_panel.index_button.click()
+    window.index_job.progress.connect(lambda done, total, _path: seen.append((done, total)))
+    qtbot.waitUntil(lambda: window.index_job is None, timeout=10000)
+
+    assert seen[-1] == (2, 2)
+    assert window.progress_bar.isHidden()
+    assert window.errors_button.isHidden()
+
+
+def test_gui_stays_responsive_while_indexing(qtbot, window, docs, monkeypatch):
+    for n in range(10):
+        (docs / f"extra{n}.txt").write_text("filler", encoding="utf-8")
+    real_extract = indexer.extract_text
+
+    def slow_extract(path):
+        time.sleep(0.05)
+        return real_extract(path)
+
+    monkeypatch.setattr(indexer, "extract_text", slow_extract)
+    ticks = []
+    timer = QTimer()
+    timer.timeout.connect(lambda: ticks.append(window.progress_bar.value()))
+    timer.start(20)
+
+    window.folder_panel.add_folder(docs)
+    window.folder_panel.index_button.click()
+    assert not window.folder_panel.index_button.isEnabled()
+    qtbot.waitUntil(lambda: window.index_job is None, timeout=10000)
+    timer.stop()
+
+    # The event loop kept running, and progress was visible part-way through.
+    assert len(ticks) > 10
+    assert any(0 < value < 12 for value in ticks)
+
+
+def test_indexing_problems_are_listed(qtbot, window, docs, tmp_path, monkeypatch):
+    (docs / "broken.pdf").write_bytes(b"not a pdf")
+    gone = tmp_path / "unplugged"
+    gone.mkdir()
+    window.folder_panel.add_folder(docs)
+    window.folder_panel.add_folder(gone)
+    gone.rmdir()
+    index_and_wait(qtbot, window)
+
+    assert window.errors_button.isVisible()
+    assert window.errors_button.text() == "2 problems…"
+
+    shown = []
+    monkeypatch.setattr(IndexErrorsDialog, "exec", lambda dialog: shown.append(dialog))
+    window.errors_button.click()
+    table = shown[0].table
+    rows = {table.item(row, 0).text(): table.item(row, 1).text() for row in range(table.rowCount())}
+    assert rows[str(gone.resolve())] == "Folder not found; skipped"
+    assert "cannot parse PDF" in rows[str((docs / "broken.pdf").resolve())]
