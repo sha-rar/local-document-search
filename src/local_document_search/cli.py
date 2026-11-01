@@ -1,20 +1,77 @@
-"""Initial command-line interface; functionality will be implemented incrementally."""
+"""Command-line interface for indexing folders and searching their contents."""
 
 import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from .indexer import index_folder
+from .search import search
+from .storage import IndexStore, default_db_path
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docsearch", description="Index and search documents locally."
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help=f"Index database file (default: {default_db_path()})",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
     index_command = commands.add_parser("index", help="Index documents in a folder")
-    index_command.add_argument("folder", help="Folder to index")
+    index_command.add_argument("folder", type=Path, help="Folder to index")
 
     search_command = commands.add_parser("search", help="Search indexed document contents")
-    search_command.add_argument("query", help="Text or phrase to find")
+    search_command.add_argument("query", help='Words to find; use "quotes" for a phrase')
+    search_command.add_argument(
+        "-n", "--limit", type=int, default=20, help="Maximum results (default: 20)"
+    )
+    return parser
 
-    args = parser.parse_args(argv)
-    print(f"TODO: '{args.command}' is not implemented yet.")
-    return 2
+
+def run_index(db_path: Path, folder: Path) -> int:
+    if not folder.is_dir():
+        print(f"error: not a directory: {folder}", file=sys.stderr)
+        return 1
+    with IndexStore(db_path) as store:
+        report = index_folder(store, folder)
+        total = store.document_count()
+
+    print(
+        f"Indexed {folder.resolve()}: {report.added} added, {report.updated} updated, "
+        f"{report.unchanged} unchanged, {report.removed} removed, "
+        f"{report.unsupported} unsupported, {len(report.failed)} failed."
+    )
+    for path, reason in report.failed:
+        print(f"  failed: {path}: {reason}", file=sys.stderr)
+    print(f"{total} documents in index ({db_path}).")
+    return 0
+
+
+def run_search(db_path: Path, query: str, limit: int) -> int:
+    if not db_path.exists():
+        print(f"error: no index at {db_path}; run 'docsearch index <folder>' first", file=sys.stderr)
+        return 1
+    with IndexStore(db_path) as store:
+        hits = search(store, query, limit)
+
+    if not hits:
+        print("No matches.")
+        return 0
+    for hit in hits:
+        modified = datetime.fromtimestamp(hit.mtime).strftime("%Y-%m-%d %H:%M")
+        print(f"{hit.path}  (modified {modified})")
+        print(f"    {' '.join(hit.snippet.split())}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    db_path = args.db or default_db_path()
+    if args.command == "index":
+        return run_index(db_path, args.folder)
+    return run_search(db_path, args.query, args.limit)
