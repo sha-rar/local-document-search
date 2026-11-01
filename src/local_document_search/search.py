@@ -92,35 +92,50 @@ def search(
     if not fts_query:
         return []
     filter_sql, filter_params = (filters or SearchFilters()).to_sql()
-    rows = store.connection.execute(
-        f"""
-        SELECT d.path, d.mtime, d.size,
-               snippet(documents_fts, 1, ?, ?, ?, ?) AS snippet,
-               bm25(documents_fts, ?, ?) AS score
-        FROM documents_fts
-        JOIN documents AS d ON d.id = documents_fts.rowid
-        WHERE documents_fts MATCH ?{filter_sql}
-        ORDER BY score
-        LIMIT ?
-        """,
-        (
-            *highlight,
-            SNIPPET_ELLIPSIS,
-            snippet_tokens,
-            NAME_WEIGHT,
-            CONTENT_WEIGHT,
-            fts_query,
-            *filter_params,
-            limit,
-        ),
-    ).fetchall()
-    return [
-        SearchHit(
-            path=row["path"],
-            snippet=row["snippet"],
-            mtime=row["mtime"],
-            size=row["size"],
-            score=row["score"],
+    # Rank before touching anything else: snippet() or a join in the ranking query would
+    # run for every match before LIMIT applies, roughly doubling the cost of a
+    # common-word search. Filters need the documents table, so only they join early.
+    if filter_sql:
+        ranked = store.connection.execute(
+            f"""
+            SELECT documents_fts.rowid AS id, bm25(documents_fts, ?, ?) AS score
+            FROM documents_fts
+            JOIN documents AS d ON d.id = documents_fts.rowid
+            WHERE documents_fts MATCH ?{filter_sql}
+            ORDER BY score
+            LIMIT ?
+            """,
+            (NAME_WEIGHT, CONTENT_WEIGHT, fts_query, *filter_params, limit),
+        ).fetchall()
+    else:
+        ranked = store.connection.execute(
+            """
+            SELECT rowid AS id, bm25(documents_fts, ?, ?) AS score
+            FROM documents_fts
+            WHERE documents_fts MATCH ?
+            ORDER BY score
+            LIMIT ?
+            """,
+            (NAME_WEIGHT, CONTENT_WEIGHT, fts_query, limit),
+        ).fetchall()
+
+    hits = []
+    for row in ranked:
+        document = store.connection.execute(
+            "SELECT path, mtime, size FROM documents WHERE id = ?", (row["id"],)
+        ).fetchone()
+        snippet = store.connection.execute(
+            "SELECT snippet(documents_fts, 1, ?, ?, ?, ?) FROM documents_fts"
+            " WHERE documents_fts MATCH ? AND rowid = ?",
+            (*highlight, SNIPPET_ELLIPSIS, snippet_tokens, fts_query, row["id"]),
+        ).fetchone()[0]
+        hits.append(
+            SearchHit(
+                path=document["path"],
+                snippet=snippet,
+                mtime=document["mtime"],
+                size=document["size"],
+                score=row["score"],
+            )
         )
-        for row in rows
-    ]
+    return hits
