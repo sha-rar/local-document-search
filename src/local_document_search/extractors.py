@@ -7,6 +7,8 @@ Each extractor takes a file path and returns its text. Register new formats in
 from collections.abc import Callable
 from pathlib import Path
 
+from pypdf import PdfReader
+
 Extractor = Callable[[Path], str]
 
 
@@ -36,9 +38,28 @@ def extract_plain_text(path: Path) -> str:
         raise ExtractionError(f"cannot decode text: {exc.reason}") from exc
 
 
+def extract_pdf_text(path: Path) -> str:
+    """Extract the text layer of a PDF; scanned pages without one yield no text."""
+    try:
+        reader = PdfReader(path)
+        # Many encrypted PDFs only restrict editing and open with an empty password.
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise ExtractionError("PDF is password-protected")
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except ExtractionError:
+        raise
+    except OSError as exc:
+        raise ExtractionError(f"cannot read file: {exc.strerror or exc}") from exc
+    except Exception as exc:
+        # pypdf raises many exception types for malformed files; one bad PDF must not stop a scan.
+        raise ExtractionError(f"cannot parse PDF: {exc}") from exc
+    return "\n\n".join(pages)
+
+
 EXTRACTORS: dict[str, Extractor] = {
     ".txt": extract_plain_text,
     ".md": extract_plain_text,
+    ".pdf": extract_pdf_text,
 }
 
 

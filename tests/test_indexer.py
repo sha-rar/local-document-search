@@ -29,6 +29,13 @@ def test_indexes_supported_files_recursively(store, docs):
     assert store.document_count() == 2
 
 
+def test_broken_pdf_is_reported_without_stopping_scan(store, docs):
+    (docs / "broken.pdf").write_bytes(b"not a pdf")
+    report = index_folder(store, docs)
+    assert report.added == 2
+    assert [path.name for path, _reason in report.failed] == ["broken.pdf"]
+
+
 def test_reindex_skips_unchanged_files(store, docs):
     index_folder(store, docs)
     report = index_folder(store, docs)
