@@ -365,3 +365,44 @@ def test_applied_settings_are_saved_and_used(qtbot, window, docs):
     window.search_panel.run_search()
     assert window.results_list.count() == 10
     assert load_settings(window.settings_path).result_limit == 10
+
+
+@pytest.fixture
+def fast_monitor(monkeypatch):
+    monkeypatch.setattr(MainWindow, "monitor_debounce", 0.1)
+
+
+def test_changes_are_indexed_automatically(qtbot, window, docs, fast_monitor):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    assert window.monitor is not None
+
+    (docs / "fresh.md").write_text("watchdog keyword", encoding="utf-8")
+    window.search_field.setText("keyword")
+
+    def found():
+        window.search_panel.run_search()
+        return result_names(window) == ["fresh.md"]
+
+    qtbot.waitUntil(found, timeout=5000)
+    # The row is committed slightly before the window hears the job finished.
+    qtbot.waitUntil(
+        lambda: window.statusBar().currentMessage().startswith("Index updated: 1 added"),
+        timeout=5000,
+    )
+
+    (docs / "fresh.md").unlink()
+    qtbot.waitUntil(lambda: not found() and window.index_job is None, timeout=5000)
+    assert window.results_list.count() == 0
+
+
+def test_watching_can_be_turned_off(qtbot, window, docs, fast_monitor):
+    window.folder_panel.add_folder(docs)
+    assert window.monitor is not None
+    window.apply_settings(Settings(folders=window.settings.folders, watch_folders=False))
+    assert window.monitor is None
+
+
+def test_changes_to_index_files_are_ignored(qtbot, window, fast_monitor):
+    window._on_files_changed({window.db_path.with_name("index.db-wal")})
+    assert window.index_job is None and window.pending_changes == set()

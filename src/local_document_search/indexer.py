@@ -69,6 +69,46 @@ def find_moved_source(store: IndexStore, size: int, content_hash: str) -> Docume
     return None
 
 
+def _index_file(store: IndexStore, path: Path, report: IndexReport) -> bool:
+    """Bring one supported file's entry up to date; return whether the database changed."""
+    key = str(path)
+    try:
+        stat = path.stat()
+        existing = store.get_document(key)
+        stat_unchanged = (
+            existing is not None
+            and existing.mtime == stat.st_mtime
+            and existing.size == stat.st_size
+        )
+        if stat_unchanged and existing.content_hash is not None:
+            report.unchanged += 1
+            return False
+        digest = file_hash(path)
+    except OSError as exc:
+        report.failed.append((path, exc.strerror or str(exc)))
+        return False
+
+    if existing is not None and (stat_unchanged or existing.content_hash == digest):
+        # Same bytes (e.g. only touched, or indexed before hashes were stored).
+        store.update_file_state(existing.id, stat.st_mtime, stat.st_size, digest)
+        report.unchanged += 1
+    elif existing is None and (source := find_moved_source(store, stat.st_size, digest)):
+        store.move_document(source.id, key, stat.st_mtime)
+        report.moved += 1
+    else:
+        try:
+            text = extract_text(path)
+        except ExtractionError as exc:
+            report.failed.append((path, str(exc)))
+            return False
+        store.upsert_document(key, stat.st_mtime, stat.st_size, text, digest)
+        if existing:
+            report.updated += 1
+        else:
+            report.added += 1
+    return True
+
+
 def index_folder(
     store: IndexStore,
     root: Path,
@@ -91,50 +131,55 @@ def index_folder(
             continue
         if progress:
             progress(path)
-        key = str(path)
-        seen.add(key)
-        try:
-            stat = path.stat()
-            existing = store.get_document(key)
-            stat_unchanged = (
-                existing is not None
-                and existing.mtime == stat.st_mtime
-                and existing.size == stat.st_size
-            )
-            if stat_unchanged and existing.content_hash is not None:
-                report.unchanged += 1
-                continue
-            digest = file_hash(path)
-        except OSError as exc:
-            report.failed.append((path, exc.strerror or str(exc)))
-            continue
-
-        if existing is not None and (stat_unchanged or existing.content_hash == digest):
-            # Same bytes (e.g. only touched, or indexed before hashes were stored).
-            store.update_file_state(existing.id, stat.st_mtime, stat.st_size, digest)
-            report.unchanged += 1
-        elif existing is None and (source := find_moved_source(store, stat.st_size, digest)):
-            store.move_document(source.id, key, stat.st_mtime)
-            report.moved += 1
-        else:
-            try:
-                text = extract_text(path)
-            except ExtractionError as exc:
-                report.failed.append((path, str(exc)))
-                continue
-            store.upsert_document(key, stat.st_mtime, stat.st_size, text, digest)
-            if existing:
-                report.updated += 1
-            else:
-                report.added += 1
-
-        pending += 1
+        seen.add(str(path))
+        if _index_file(store, path, report):
+            pending += 1
         if pending >= COMMIT_EVERY:
             store.commit()
             pending = 0
 
     for key in store.all_paths():
         if key not in seen and Path(key).is_relative_to(root):
+            store.delete_document(key)
+            report.removed += 1
+
+    store.commit()
+    return report
+
+
+def update_paths(
+    store: IndexStore,
+    paths: Iterable[Path],
+    roots: Iterable[Path],
+    exclude: Iterable[Path] = (),
+) -> IndexReport:
+    """Apply changes to specific files or folders, e.g. reported by a filesystem watcher.
+
+    Paths outside ``roots`` or inside ``exclude`` are ignored. Existing paths are indexed
+    before missing ones are removed, so a move is recognised rather than re-extracted.
+    """
+    roots = [Path(root).resolve() for root in roots]
+    excluded = [Path(folder).resolve() for folder in exclude]
+    report = IndexReport()
+    relevant = {
+        Path(path)
+        for path in paths
+        if any(Path(path).is_relative_to(root) for root in roots)
+        and not is_excluded(Path(path), excluded)
+    }
+    present = sorted(path for path in relevant if path.exists())
+    missing = sorted(path for path in relevant if not path.exists())
+
+    for path in present:
+        files = iter_files(path, report.failed, excluded) if path.is_dir() else [path]
+        for file in files:
+            if is_supported(file):
+                _index_file(store, file, report)
+            else:
+                report.unsupported += 1
+    for path in missing:
+        # A missing path may have been a file or a whole folder.
+        for key in store.paths_under(path):
             store.delete_document(key)
             report.removed += 1
 

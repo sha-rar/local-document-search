@@ -61,11 +61,14 @@ class SettingsDialog(QDialog):
         self.result_limit.setValue(settings.result_limit)
         self.index_on_startup = QCheckBox("Update the index when FileLens starts")
         self.index_on_startup.setChecked(settings.index_on_startup)
+        self.watch_folders = QCheckBox("Update the index automatically when files change")
+        self.watch_folders.setChecked(settings.watch_folders)
 
         preferences_box = QGroupBox("Preferences")
         preferences = QFormLayout(preferences_box)
         preferences.addRow("Maximum results", self.result_limit)
         preferences.addRow(self.index_on_startup)
+        preferences.addRow(self.watch_folders)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -99,6 +102,7 @@ class SettingsDialog(QDialog):
             excluded_folders=self.excluded_folders(),
             result_limit=self.result_limit.value(),
             index_on_startup=self.index_on_startup.isChecked(),
+            watch_folders=self.watch_folders.isChecked(),
         )
 
     def _choose_excluded(self) -> None:

@@ -19,6 +19,7 @@ class Settings:
     excluded_folders: list[str] = field(default_factory=list)
     result_limit: int = DEFAULT_RESULT_LIMIT
     index_on_startup: bool = False
+    watch_folders: bool = True
 
 
 def default_settings_path() -> Path:
@@ -30,7 +31,7 @@ def _valid(name: str, value: object) -> bool:
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     if name == "result_limit":
         return isinstance(value, int) and not isinstance(value, bool)
-    if name == "index_on_startup":
+    if name in ("index_on_startup", "watch_folders"):
         return isinstance(value, bool)
     return False
 

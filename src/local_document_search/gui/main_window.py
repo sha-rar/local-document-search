@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..indexer import IndexReport, remove_folder
+from ..monitor import FolderMonitor
 from ..search import SearchHit
 from ..settings import Settings, load_settings, save_settings
 from ..storage import IndexStore
@@ -28,7 +29,16 @@ from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
 
 
+class _ChangeBridge(QObject):
+    """Carries monitor callbacks from the watcher thread to the GUI thread."""
+
+    changed = Signal(object)  # set[Path]
+
+
 class MainWindow(QMainWindow):
+    # Seconds of quiet before a burst of file changes is applied.
+    monitor_debounce = 1.0
+
     def __init__(
         self,
         db_path: Path,
@@ -41,6 +51,10 @@ class MainWindow(QMainWindow):
         self.settings_path = Path(settings_path or self.db_path.with_name("settings.json"))
         self.settings = load_settings(self.settings_path)
         self.index_job: IndexJob | None = None
+        self.monitor: FolderMonitor | None = None
+        self.pending_changes: set[Path] = set()
+        self._change_bridge = _ChangeBridge(self)
+        self._change_bridge.changed.connect(self._on_files_changed)
         self.setWindowTitle("FileLens")
         self.resize(1100, 700)
         self._build_menu()
@@ -96,21 +110,56 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.errors_button)
         self.statusBar().addPermanentWidget(self.progress_bar)
         self.statusBar().showMessage("Ready")
+        self.restart_monitor()
 
     def start_indexing(self) -> None:
-        folders = self.folder_panel.folders()
-        if self.index_job is not None or not folders:
+        if self.index_job is not None or not self.folder_panel.folders():
             return
+        self.errors_button.hide()
+        # A full scan covers anything the monitor reported.
+        self.pending_changes.clear()
+        self._start_job(changed_paths=None)
+
+    def _start_job(self, changed_paths: set[Path] | None) -> None:
         exclude = [Path(folder) for folder in self.settings.excluded_folders]
-        self.index_job = IndexJob(self.db_path, folders, exclude, parent=self)
+        self.index_job = IndexJob(
+            self.db_path, self.folder_panel.folders(), exclude, changed_paths, parent=self
+        )
         self.index_job.counting.connect(self._on_index_counting)
         self.index_job.progress.connect(self._on_index_progress)
         self.index_job.finished.connect(self._on_index_finished)
         self.index_job.failed.connect(self._on_index_failed)
         self.index_job.done.connect(self._on_index_done)
         self.folder_panel.set_busy(True)
-        self.errors_button.hide()
         self.index_job.start()
+
+    def restart_monitor(self) -> None:
+        """Watch the current folders, or stop watching if monitoring is turned off."""
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor = None
+        folders = self.folder_panel.folders()
+        if self.settings.watch_folders and folders:
+            self.monitor = FolderMonitor(
+                folders, self._change_bridge.changed.emit, self.monitor_debounce
+            )
+            self.monitor.start()
+
+    def _on_files_changed(self, paths: set[Path]) -> None:
+        # Ignore the index's own files in case it lives inside a watched folder;
+        # otherwise each update would trigger another.
+        own_files = self.db_path.name
+        self.pending_changes |= {
+            path
+            for path in paths
+            if not (path.parent == self.db_path.parent and path.name.startswith(own_files))
+        }
+        self._apply_pending_changes()
+
+    def _apply_pending_changes(self) -> None:
+        if self.index_job is None and self.pending_changes:
+            changes, self.pending_changes = self.pending_changes, set()
+            self._start_job(changed_paths=changes)
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -122,6 +171,7 @@ class MainWindow(QMainWindow):
         save_settings(self.settings, self.settings_path)
         self.search_panel.result_limit = settings.result_limit
         self.search_panel.run_search()
+        self.restart_monitor()
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -138,6 +188,7 @@ class MainWindow(QMainWindow):
     def _save_folders(self) -> None:
         self.settings.folders = [str(folder) for folder in self.folder_panel.folders()]
         save_settings(self.settings, self.settings_path)
+        self.restart_monitor()
 
     def show_index_errors(self) -> None:
         IndexErrorsDialog(self.index_errors, self).exec()
@@ -157,11 +208,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _on_index_finished(self, reports: list[tuple[Path, IndexReport]], missing: list[Path]) -> None:
-        message = f"Indexing complete: {summarize(reports)}"
-        if missing:
-            message += f"; skipped {len(missing)} missing folder(s)"
-        self.statusBar().showMessage(message)
-        self.index_errors = collect_errors(reports, missing)
+        errors = collect_errors(reports, missing)
+        if self.index_job.is_update:
+            self.statusBar().showMessage(f"Index updated: {summarize(reports)}")
+            # Keep the last full scan's problems and add any new ones.
+            self.index_errors.extend(errors)
+        else:
+            message = f"Indexing complete: {summarize(reports)}"
+            if missing:
+                message += f"; skipped {len(missing)} missing folder(s)"
+            self.statusBar().showMessage(message)
+            self.index_errors = errors
         if self.index_errors:
             count = len(self.index_errors)
             self.errors_button.setText(f"{count} problem{'s' if count != 1 else ''}…")
@@ -176,6 +233,7 @@ class MainWindow(QMainWindow):
         self.index_job = None
         self.progress_bar.hide()
         self.folder_panel.set_busy(False)
+        self._apply_pending_changes()
 
     def open_hit(self, hit: SearchHit | None) -> None:
         if hit is not None and self._check_exists(hit) and not open_document(Path(hit.path)):
@@ -211,6 +269,9 @@ class MainWindow(QMainWindow):
         self.search_panel.run_search()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor = None
         # The worker thread must finish before its QThread is destroyed.
         if self.index_job is not None:
             self.index_job.wait()

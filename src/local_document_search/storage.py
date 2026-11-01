@@ -183,6 +183,16 @@ class IndexStore:
         self.connection.execute("DELETE FROM documents_fts WHERE rowid = ?", (existing.id,))
         self.connection.execute("DELETE FROM documents WHERE id = ?", (existing.id,))
 
+    def paths_under(self, path: Path) -> list[str]:
+        """Indexed paths equal to ``path`` or inside it as a folder."""
+        path_text = str(path)
+        prefix = path_text if path_text.endswith(os.sep) else path_text + os.sep
+        rows = self.connection.execute(
+            "SELECT path FROM documents WHERE path = ? OR substr(path, 1, ?) = ?",
+            (path_text, len(prefix), prefix),
+        )
+        return [row["path"] for row in rows]
+
     def all_paths(self) -> list[str]:
         return [row["path"] for row in self.connection.execute("SELECT path FROM documents")]
 

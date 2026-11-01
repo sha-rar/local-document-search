@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..extractors import is_supported
-from ..indexer import IndexReport, index_folder, iter_files
+from ..indexer import IndexReport, index_folder, iter_files, update_paths
 from ..storage import IndexStore
 
 # Minimum seconds between progress signals, so large scans don't flood the event loop.
@@ -17,7 +17,11 @@ MISSING_FOLDER_REASON = "Folder not found; skipped"
 
 
 class IndexWorker(QObject):
-    """Indexes folders with its own database connection; lives on a ``QThread``."""
+    """Indexes folders with its own database connection; lives on a ``QThread``.
+
+    With ``changed_paths`` it only applies those changes (from the folder monitor)
+    instead of scanning every folder.
+    """
 
     counting = Signal()
     progress = Signal(int, int, str)  # files processed, files expected, current path
@@ -25,14 +29,24 @@ class IndexWorker(QObject):
     finished = Signal(object, object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, folders: list[Path], exclude: Iterable[Path] = ()):
+    def __init__(
+        self,
+        db_path: Path,
+        folders: list[Path],
+        exclude: Iterable[Path] = (),
+        changed_paths: Iterable[Path] | None = None,
+    ):
         super().__init__()
         self.db_path = db_path
         self.folders = list(folders)
         self.exclude = list(exclude)
+        self.changed_paths = None if changed_paths is None else set(changed_paths)
 
     @Slot()
     def run(self) -> None:
+        if self.changed_paths is not None:
+            self._apply_changes()
+            return
         reports: list[tuple[Path, IndexReport]] = []
         # Indexing a vanished folder (e.g. an unplugged drive) would delete its entries.
         present = [folder for folder in self.folders if folder.is_dir()]
@@ -65,6 +79,15 @@ class IndexWorker(QObject):
             return
         self.finished.emit(reports, missing)
 
+    def _apply_changes(self) -> None:
+        try:
+            with IndexStore(self.db_path) as store:
+                report = update_paths(store, self.changed_paths, self.folders, self.exclude)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit([(None, report)], [])
+
 
 class IndexJob(QObject):
     """Owns a worker and its thread for one indexing run."""
@@ -80,11 +103,13 @@ class IndexJob(QObject):
         db_path: Path,
         folders: list[Path],
         exclude: Iterable[Path] = (),
+        changed_paths: Iterable[Path] | None = None,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
+        self.is_update = changed_paths is not None
         self.thread = QThread()
-        self.worker = IndexWorker(db_path, folders, exclude)
+        self.worker = IndexWorker(db_path, folders, exclude, changed_paths)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.counting.connect(self.counting)
