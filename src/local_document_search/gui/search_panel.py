@@ -15,24 +15,29 @@ from PySide6.QtWidgets import (
 )
 
 from ..extractors import EXTRACTORS
-from ..search import SearchFilters, SearchHit, search
+from ..search import SearchFilters, SearchHit
 from ..settings import DEFAULT_RESULT_LIMIT
-from ..storage import IndexStore
-from .preview import HIGHLIGHT_END, HIGHLIGHT_START, PREVIEW_SNIPPET_TOKENS, TYPE_LABELS
+from .preview import TYPE_LABELS
+from .searching import SearchService
 
 SEARCH_DELAY_MS = 250
 
 
 class SearchPanel(QWidget):
-    """Runs searches against the index and lists the hits."""
+    """Runs searches against the index in the background and lists the hits."""
 
     result_selected = Signal(object)  # SearchHit | None
     result_activated = Signal(object)  # SearchHit
+    search_finished = Signal()  # results (or a message) for the latest search are shown
 
     def __init__(self, db_path: Path, parent: QWidget | None = None):
         super().__init__(parent)
         self.db_path = Path(db_path)
         self.result_limit = DEFAULT_RESULT_LIMIT
+        self.service = SearchService(self.db_path, self)
+        self.service.finished.connect(self._on_results)
+        self.service.failed.connect(self._on_failed)
+        self._pending_request: int | None = None
 
         self.search_field = QLineEdit()
         self.search_field.setPlaceholderText("Search document contents")
@@ -76,25 +81,35 @@ class SearchPanel(QWidget):
         extension = self.type_filter.currentData()
         return SearchFilters(extensions=(extension,) if extension else ())
 
+    @property
+    def busy(self) -> bool:
+        return self._pending_request is not None
+
     def run_search(self) -> None:
+        """Start a search for the current text; results replace the list when they arrive."""
         self._timer.stop()
         query = self.search_field.text().strip()
+        if not query or not self.db_path.exists():
+            self._pending_request = None  # drop any search still in flight
+            self.results_list.clear()
+            if query:
+                self.count_label.setText("Nothing indexed yet. Add a folder and choose Index now.")
+            else:
+                self.count_label.clear()
+            self.search_finished.emit()
+            return
+        # Previous results stay visible until the new ones arrive, so the list doesn't flicker.
+        self._pending_request = self.service.submit(query, self.result_limit, self.filters())
+
+    def shutdown(self) -> None:
+        self._pending_request = None
+        self.service.shutdown()
+
+    def _on_results(self, request_id: int, hits: list[SearchHit]) -> None:
+        if request_id != self._pending_request:
+            return  # superseded by a newer search
+        self._pending_request = None
         self.results_list.clear()
-        if not query:
-            self.count_label.clear()
-            return
-        if not self.db_path.exists():
-            self.count_label.setText("Nothing indexed yet. Add a folder and choose Index now.")
-            return
-        with IndexStore(self.db_path) as store:
-            hits = search(
-                store,
-                query,
-                self.result_limit,
-                self.filters(),
-                highlight=(HIGHLIGHT_START, HIGHLIGHT_END),
-                snippet_tokens=PREVIEW_SNIPPET_TOKENS,
-            )
         for hit in hits:
             path = Path(hit.path)
             item = QListWidgetItem(f"{path.name}\n{path.parent}")
@@ -104,6 +119,15 @@ class SearchPanel(QWidget):
         self.count_label.setText(self._count_text(len(hits)))
         if hits:
             self.results_list.setCurrentRow(0)
+        self.search_finished.emit()
+
+    def _on_failed(self, request_id: int, message: str) -> None:
+        if request_id != self._pending_request:
+            return
+        self._pending_request = None
+        self.results_list.clear()
+        self.count_label.setText(f"Search failed: {message}")
+        self.search_finished.emit()
 
     def hits(self) -> list[SearchHit]:
         return [

@@ -15,6 +15,8 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("FileLens")
     window = MainWindow(default_db_path(), default_settings_path())
     window.show()
+    # Quitting without closing the window (e.g. at logoff) must still stop worker threads.
+    app.aboutToQuit.connect(window.close)
     if window.settings.index_on_startup:
         # Start after the window has painted so the progress bar is visible.
         QTimer.singleShot(0, window.start_indexing)

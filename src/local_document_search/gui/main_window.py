@@ -317,9 +317,10 @@ class MainWindow(QMainWindow):
         if self.monitor is not None:
             self.monitor.stop()
             self.monitor = None
-        # The worker thread must finish before its QThread is destroyed; cancelling
-        # first means that only takes as long as the current file.
+        # Worker threads must finish before their QThreads are destroyed; cancelling
+        # indexing first means that only takes as long as the current file.
         if self.index_job is not None:
             self.index_job.cancel()
             self.index_job.wait()
+        self.search_panel.shutdown()
         super().closeEvent(event)

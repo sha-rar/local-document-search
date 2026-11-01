@@ -1,3 +1,5 @@
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -8,6 +10,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt, QTimer  # noqa: E402
 
 from local_document_search import indexer  # noqa: E402
+from local_document_search.gui import searching  # noqa: E402
 from local_document_search.gui import main_window  # noqa: E402
 from local_document_search.gui.errors import IndexErrorsDialog  # noqa: E402
 from local_document_search.gui.main_window import MainWindow  # noqa: E402
@@ -44,7 +47,16 @@ def docs(tmp_path):
 def index_and_wait(qtbot, window):
     window.folder_panel.index_button.click()
     assert window.index_job is not None
-    qtbot.waitUntil(lambda: window.index_job is None, timeout=10000)
+    # Finishing an index also re-runs the current search in the background.
+    qtbot.waitUntil(
+        lambda: window.index_job is None and not window.search_panel.busy, timeout=10000
+    )
+
+
+def run_search(qtbot, window):
+    """Search for the current text and wait for the background search to report back."""
+    with qtbot.waitSignal(window.search_panel.search_finished, timeout=5000):
+        window.search_panel.run_search()
 
 
 def indexed_count(window):
@@ -112,9 +124,9 @@ def result_names(window):
     return [Path(hit.path).name for hit in window.search_panel.hits()]
 
 
-def test_search_before_indexing_explains(window):
+def test_search_before_indexing_explains(qtbot, window):
     window.search_field.setText("budget")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     assert "Nothing indexed yet" in window.search_panel.count_label.text()
 
 
@@ -128,11 +140,12 @@ def test_typing_searches_after_a_pause(qtbot, window, docs):
     assert window.search_panel.count_label.text() == "2 results."
 
     qtbot.keyClicks(window.search_field, " alpha")
-    qtbot.keyClick(window.search_field, Qt.Key.Key_Return)
+    with qtbot.waitSignal(window.search_panel.search_finished, timeout=5000):
+        qtbot.keyClick(window.search_field, Qt.Key.Key_Return)
     assert result_names(window) == ["a.txt"]
 
     window.search_field.clear()
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     assert window.results_list.count() == 0
 
 
@@ -140,16 +153,17 @@ def test_type_filter_narrows_results(qtbot, window, docs):
     window.folder_panel.add_folder(docs)
     index_and_wait(qtbot, window)
     window.search_field.setText("budget")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
 
     combo = window.search_panel.type_filter
-    combo.setCurrentIndex(combo.findData(".md"))
+    with qtbot.waitSignal(window.search_panel.search_finished, timeout=5000):
+        combo.setCurrentIndex(combo.findData(".md"))
     assert result_names(window) == ["b.md"]
 
 
 def test_results_refresh_after_indexing(qtbot, window, docs):
     window.search_field.setText("budget")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     window.folder_panel.add_folder(docs)
     index_and_wait(qtbot, window)
     assert window.results_list.count() == 2
@@ -182,18 +196,18 @@ def test_selecting_result_updates_preview(qtbot, window, docs):
     window.folder_panel.add_folder(docs)
     index_and_wait(qtbot, window)
     window.search_field.setText("alpha budget")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
 
     # The top result is selected automatically.
     text = window.preview.toPlainText()
     assert "a.txt" in text and "alpha budget" in text
 
     window.search_field.setText("script")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     assert "<script>budget</script>" in window.preview.toPlainText()
 
     window.search_field.clear()
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     assert window.preview.toPlainText() == ""
 
 
@@ -211,7 +225,7 @@ def search_for(qtbot, window, docs, query):
     window.folder_panel.add_folder(docs)
     index_and_wait(qtbot, window)
     window.search_field.setText(query)
-    window.search_panel.run_search()
+    run_search(qtbot, window)
 
 
 def test_open_buttons_need_a_selection(window):
@@ -362,7 +376,7 @@ def test_applied_settings_are_saved_and_used(qtbot, window, docs):
 
     assert indexed_count(window) == 16  # nested/b.md is excluded
     window.search_field.setText("budget")
-    window.search_panel.run_search()
+    run_search(qtbot, window)
     assert window.results_list.count() == 10
     assert load_settings(window.settings_path).result_limit == 10
 
@@ -381,7 +395,7 @@ def test_changes_are_indexed_automatically(qtbot, window, docs, fast_monitor):
     window.search_field.setText("keyword")
 
     def found():
-        window.search_panel.run_search()
+        run_search(qtbot, window)
         return result_names(window) == ["fresh.md"]
 
     qtbot.waitUntil(found, timeout=5000)
@@ -488,3 +502,60 @@ def test_gui_indexing_applies_skip_rules(qtbot, window, docs):
     index_and_wait(qtbot, window)
     # nested/b.md is skipped by type and ~$a.txt by the default pattern.
     assert indexed_count(window) == 1
+
+
+def test_search_runs_off_the_gui_thread(qtbot, window, docs, monkeypatch):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    real_search = searching.search
+    threads = []
+
+    def slow_search(*args, **kwargs):
+        threads.append(threading.current_thread())
+        time.sleep(0.3)
+        return real_search(*args, **kwargs)
+
+    monkeypatch.setattr(searching, "search", slow_search)
+    window.search_field.setText("budget")
+    started = time.monotonic()
+    window.search_panel.run_search()
+    assert time.monotonic() - started < 0.1  # returned without waiting for the query
+    assert window.search_panel.busy
+    qtbot.waitUntil(lambda: not window.search_panel.busy, timeout=5000)
+    assert threads and threads[0] is not threading.main_thread()
+    assert window.results_list.count() == 2
+
+
+def test_only_the_latest_search_is_shown(qtbot, window, docs, monkeypatch):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+    real_search = searching.search
+
+    def slow_search(store, query, *args, **kwargs):
+        time.sleep(0.2)
+        return real_search(store, query, *args, **kwargs)
+
+    monkeypatch.setattr(searching, "search", slow_search)
+    finished = []
+    window.search_panel.search_finished.connect(lambda: finished.append(result_names(window)))
+    for text in ("budget", "alpha", "beta"):
+        window.search_field.setText(text)
+        window.search_panel.run_search()
+    qtbot.waitUntil(lambda: not window.search_panel.busy, timeout=5000)
+    qtbot.wait(300)  # give any stale result a chance to (wrongly) arrive
+
+    assert finished == [["b.md"]]
+    assert result_names(window) == ["b.md"]
+
+
+def test_search_failure_is_reported(qtbot, window, docs, monkeypatch):
+    window.folder_panel.add_folder(docs)
+    index_and_wait(qtbot, window)
+
+    def broken_search(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(searching, "search", broken_search)
+    window.search_field.setText("budget")
+    run_search(qtbot, window)
+    assert window.search_panel.count_label.text() == "Search failed: disk I/O error"
