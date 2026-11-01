@@ -2,6 +2,7 @@
 
 import argparse
 import signal
+import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -160,6 +161,22 @@ def run_search(db_path: Path, query: str, limit: int, filters: SearchFilters) ->
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     db_path = args.db or default_db_path()
+    try:
+        return dispatch(args, db_path)
+    except sqlite3.OperationalError as exc:
+        print(f"error: could not use the index at {db_path}: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.DatabaseError as exc:
+        print(
+            f"error: the index at {db_path} is damaged ({exc}).\n"
+            "Delete it and run 'docsearch index <folder>' again to rebuild it; "
+            "your documents are not affected.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def dispatch(args: argparse.Namespace, db_path: Path) -> int:
     if args.command == "index":
         exclusions = Exclusions(
             folders=tuple(args.exclude),

@@ -3,6 +3,7 @@
 import fnmatch
 import hashlib
 import os
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -19,6 +20,9 @@ COMMIT_INTERVAL = 2.0
 HASH_CHUNK_SIZE = 1024 * 1024
 # Files up to this size are read once and the bytes reused for hashing and extraction.
 WHOLE_FILE_LIMIT = 64 * 1024 * 1024
+# Larger documents are skipped: extracting them could exhaust memory, and a file this big
+# is almost always a log or data dump rather than something to search.
+MAX_EXTRACT_SIZE = 200 * 1024 * 1024
 
 
 @dataclass
@@ -193,6 +197,37 @@ def find_moved_source(store: IndexStore, size: int, content_hash: str) -> Docume
     return None
 
 
+def clean_text(text: str) -> str:
+    """Make extracted text storable: unpaired surrogates (seen in some PDFs) become "?"."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+    return text
+
+
+def _index_file_safely(
+    store: IndexStore,
+    path: Path,
+    report: IndexReport,
+    existing: DocumentRecord | None,
+    stat: os.stat_result,
+    known: dict[str, DocumentRecord] | None = None,
+) -> bool:
+    """``_index_file``, but an unexpected error affects only this file.
+
+    Database errors still propagate: they mean the index itself is unusable, and every
+    following file would fail the same way.
+    """
+    try:
+        return _index_file(store, path, report, existing, stat, known)
+    except sqlite3.Error:
+        raise
+    except Exception as exc:  # noqa: BLE001 - includes MemoryError and parser bugs
+        report.failed.append((path, f"unexpected error: {type(exc).__name__}: {exc}"))
+        return False
+
+
 def _index_file(
     store: IndexStore,
     path: Path,
@@ -234,12 +269,16 @@ def _index_file(
             known.pop(source.path, None)
         report.moved += 1
     else:
+        if stat.st_size > MAX_EXTRACT_SIZE:
+            size_mb = stat.st_size / 1024**2
+            report.failed.append((path, f"too large to index ({size_mb:.0f} MB)"))
+            return False
         try:
             text = extract_text(path, data)
         except ExtractionError as exc:
             report.failed.append((path, str(exc)))
             return False
-        store.upsert_document(key, stat.st_mtime, stat.st_size, text, digest)
+        store.upsert_document(key, stat.st_mtime, stat.st_size, clean_text(text), digest)
         if existing:
             report.updated += 1
         else:
@@ -291,7 +330,7 @@ def index_folder(
             except OSError as exc:
                 report.failed.append((path, exc.strerror or str(exc)))
                 continue
-            if _index_file(store, path, report, known.get(key), stat, known):
+            if _index_file_safely(store, path, report, known.get(key), stat, known):
                 pending += 1
             if pending and (
                 pending >= COMMIT_EVERY or time.monotonic() - last_commit >= COMMIT_INTERVAL
@@ -346,7 +385,7 @@ def update_paths(
             except OSError as exc:
                 report.failed.append((file, exc.strerror or str(exc)))
                 continue
-            _index_file(store, file, report, store.get_document(str(file)), stat)
+            _index_file_safely(store, file, report, store.get_document(str(file)), stat)
     for path in missing:
         # A missing path may have been a file or a whole folder.
         for key in store.paths_under(path):
