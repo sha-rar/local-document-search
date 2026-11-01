@@ -7,6 +7,8 @@ Each extractor takes a file path and returns its text. Register new formats in
 from collections.abc import Callable
 from pathlib import Path
 
+import docx
+from docx.table import Table
 from pypdf import PdfReader
 
 Extractor = Callable[[Path], str]
@@ -56,10 +58,53 @@ def extract_pdf_text(path: Path) -> str:
     return "\n\n".join(pages)
 
 
+# Password-protected Office files are OLE compound files rather than ZIP packages.
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _table_lines(table: Table) -> list[str]:
+    lines = []
+    for row in table.rows:
+        cells = []
+        seen = set()
+        for cell in row.cells:
+            # Merged cells repeat the same underlying cell; keep its text once.
+            if id(cell._tc) in seen:
+                continue
+            seen.add(id(cell._tc))
+            cells.append(cell.text)
+        lines.append("\t".join(cells))
+    return lines
+
+
+def extract_docx_text(path: Path) -> str:
+    """Extract body paragraphs and table text from a Word document, in document order."""
+    try:
+        with path.open("rb") as fh:
+            if fh.read(len(OLE_SIGNATURE)) == OLE_SIGNATURE:
+                raise ExtractionError("DOCX is password-protected")
+        document = docx.Document(str(path))
+        lines = []
+        for block in document.iter_inner_content():
+            if isinstance(block, Table):
+                lines.extend(_table_lines(block))
+            else:
+                lines.append(block.text)
+    except ExtractionError:
+        raise
+    except OSError as exc:
+        raise ExtractionError(f"cannot read file: {exc.strerror or exc}") from exc
+    except Exception as exc:
+        # python-docx raises ZIP, XML and package errors for malformed files.
+        raise ExtractionError(f"cannot parse DOCX: {exc}") from exc
+    return "\n".join(lines)
+
+
 EXTRACTORS: dict[str, Extractor] = {
     ".txt": extract_plain_text,
     ".md": extract_plain_text,
     ".pdf": extract_pdf_text,
+    ".docx": extract_docx_text,
 }
 
 
