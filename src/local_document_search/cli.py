@@ -33,6 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def format_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 def run_index(db_path: Path, folder: Path) -> int:
     if not folder.is_dir():
         print(f"error: not a directory: {folder}", file=sys.stderr)
@@ -64,7 +73,7 @@ def run_search(db_path: Path, query: str, limit: int) -> int:
         return 0
     for hit in hits:
         modified = datetime.fromtimestamp(hit.mtime).strftime("%Y-%m-%d %H:%M")
-        print(f"{hit.path}  (modified {modified})")
+        print(f"{hit.path}  ({format_size(hit.size)}, modified {modified})")
         print(f"    {' '.join(hit.snippet.split())}")
     return 0
 

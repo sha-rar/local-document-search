@@ -22,6 +22,7 @@ class SearchHit:
     path: str
     snippet: str
     mtime: float
+    size: int
     score: float
 
 
@@ -46,7 +47,7 @@ def search(store: IndexStore, query: str, limit: int = 20) -> list[SearchHit]:
         return []
     rows = store.connection.execute(
         """
-        SELECT d.path, d.mtime,
+        SELECT d.path, d.mtime, d.size,
                snippet(documents_fts, 1, ?, ?, ?, ?) AS snippet,
                bm25(documents_fts, ?, ?) AS score
         FROM documents_fts
@@ -67,6 +68,12 @@ def search(store: IndexStore, query: str, limit: int = 20) -> list[SearchHit]:
         ),
     ).fetchall()
     return [
-        SearchHit(path=row["path"], snippet=row["snippet"], mtime=row["mtime"], score=row["score"])
+        SearchHit(
+            path=row["path"],
+            snippet=row["snippet"],
+            mtime=row["mtime"],
+            size=row["size"],
+            score=row["score"],
+        )
         for row in rows
     ]
