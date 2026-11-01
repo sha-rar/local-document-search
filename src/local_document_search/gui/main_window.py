@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
-    QLabel,
     QLineEdit,
     QListWidget,
     QMainWindow,
@@ -14,15 +14,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..indexer import IndexReport, remove_folder
+from ..storage import IndexStore
+from .folders import FolderPanel
+from .indexing import IndexJob, summarize
+
 
 class MainWindow(QMainWindow):
     def __init__(self, db_path: Path, parent: QWidget | None = None):
         super().__init__(parent)
         self.db_path = Path(db_path)
+        self.index_job: IndexJob | None = None
         self.setWindowTitle("FileLens")
         self.resize(1100, 700)
 
-        self.folder_panel = self._build_folder_panel()
+        self.folder_panel = FolderPanel()
+        self.folder_panel.index_requested.connect(self.start_indexing)
+        self.folder_panel.folder_removed.connect(self._forget_folder)
 
         self.search_field = QLineEdit()
         self.search_field.setPlaceholderText("Search document contents")
@@ -48,10 +56,39 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
 
-    def _build_folder_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("Folders"))
-        layout.addStretch()
-        return panel
+    def start_indexing(self) -> None:
+        folders = self.folder_panel.folders()
+        if self.index_job is not None or not folders:
+            return
+        self.index_job = IndexJob(self.db_path, folders, self)
+        self.index_job.finished.connect(self._on_index_finished)
+        self.index_job.failed.connect(self._on_index_failed)
+        self.index_job.done.connect(self._on_index_done)
+        self.folder_panel.set_busy(True)
+        self.statusBar().showMessage(f"Indexing {len(folders)} folder(s)…")
+        self.index_job.start()
+
+    def _on_index_finished(self, reports: list[tuple[Path, IndexReport]], missing: list[Path]) -> None:
+        message = f"Indexing complete: {summarize(reports)}"
+        if missing:
+            message += f"; skipped {len(missing)} missing folder(s)"
+        self.statusBar().showMessage(message)
+
+    def _on_index_failed(self, error: str) -> None:
+        self.statusBar().showMessage(f"Indexing failed: {error}")
+
+    def _on_index_done(self) -> None:
+        self.index_job.deleteLater()
+        self.index_job = None
+        self.folder_panel.set_busy(False)
+
+    def _forget_folder(self, folder: Path) -> None:
+        with IndexStore(self.db_path) as store:
+            removed = remove_folder(store, folder, keep=self.folder_panel.folders())
+        self.statusBar().showMessage(f"Removed {removed} document(s) from {folder}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        # The worker thread must finish before its QThread is destroyed.
+        if self.index_job is not None:
+            self.index_job.wait()
+        super().closeEvent(event)

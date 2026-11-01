@@ -2,7 +2,7 @@
 
 import hashlib
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,6 +122,20 @@ def index_folder(
 
     store.commit()
     return report
+
+
+def remove_folder(store: IndexStore, root: Path, keep: Iterable[Path] = ()) -> int:
+    """Remove documents under ``root`` unless they are also under a folder in ``keep``."""
+    root = Path(root).resolve()
+    kept = [Path(folder).resolve() for folder in keep]
+    removed = 0
+    for key in store.all_paths():
+        path = Path(key)
+        if path.is_relative_to(root) and not any(path.is_relative_to(k) for k in kept):
+            store.delete_document(key)
+            removed += 1
+    store.commit()
+    return removed
 
 
 def prune_missing(store: IndexStore) -> int:

@@ -2,7 +2,7 @@ import os
 
 import pytest
 from local_document_search import indexer
-from local_document_search.indexer import index_folder, prune_missing
+from local_document_search.indexer import index_folder, prune_missing, remove_folder
 from local_document_search.storage import IndexStore
 
 
@@ -118,6 +118,12 @@ def test_missing_hashes_are_backfilled(store, docs):
     report = index_folder(store, docs)
     assert report.unchanged == 2
     assert store.get_document(str(docs.resolve() / "one.txt")).content_hash is not None
+
+
+def test_remove_folder_keeps_documents_under_kept_folders(store, docs):
+    index_folder(store, docs)
+    assert remove_folder(store, docs, keep=[docs / "sub"]) == 1
+    assert store.get_document(str((docs / "sub" / "two.md").resolve())) is not None
 
 
 def test_prune_removes_missing_files_outside_any_root(store, tmp_path, docs):

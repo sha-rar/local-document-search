@@ -84,6 +84,8 @@ class IndexStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.db_path)
         self.connection.row_factory = sqlite3.Row
+        # WAL lets the GUI read while a background indexer writes.
+        self.connection.execute("PRAGMA journal_mode = WAL")
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
