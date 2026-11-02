@@ -90,10 +90,11 @@ Open **File → Settings…** to:
 
 ## Your data and privacy
 
-The app never sends anything over the internet. It keeps two things on your computer, in `%LOCALAPPDATA%\FileLens` (usually `C:\Users\<you>\AppData\Local\FileLens`):
+The app never sends anything over the internet. It keeps three things on your computer, in `%LOCALAPPDATA%\FileLens` (usually `C:\Users\<you>\AppData\Local\FileLens`):
 
 - **The search index** (`index.db`). This contains a copy of the text from every indexed document, so treat it as being as private as the documents themselves.
 - **Your settings** (`settings.json`).
+- **A log file** (`logs\filelens.log`). This records what the app did, to help track down problems: which folders were indexed, the names and locations of files that couldn't be read, and the text of any search that failed. It doesn't record what's written inside your documents, and old entries are discarded once the log reaches a few megabytes.
 
 To start over, close the app and delete that folder. Your actual documents are never changed, moved or deleted.
 
