@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from stat import IO_REPARSE_TAG_MOUNT_POINT
 
 from .extractors import ExtractionError, extract_text, is_supported
 from .storage import DocumentRecord, IndexStore
@@ -157,9 +158,7 @@ def scan_files(
             with os.scandir(directory) as entries:
                 for entry in entries:
                     try:
-                        if entry.is_symlink() or (
-                            hasattr(entry, "is_junction") and entry.is_junction()
-                        ):
+                        if entry.is_symlink() or _is_junction(entry):
                             continue
                         if entry.is_dir():
                             child = Path(entry.path)
@@ -172,6 +171,14 @@ def scan_files(
         except OSError as exc:
             if errors is not None:
                 errors.append((directory, exc.strerror or str(exc)))
+
+
+def _is_junction(entry: os.DirEntry) -> bool:
+    # ``DirEntry.is_junction`` only exists from Python 3.12; this is the check it makes.
+    # Only mount points count: OneDrive placeholders are reparse points too, but are
+    # ordinary folders to index.
+    tag = getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+    return tag == IO_REPARSE_TAG_MOUNT_POINT
 
 
 def iter_files(
